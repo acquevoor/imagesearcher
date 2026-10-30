@@ -29,6 +29,8 @@ Two rows of tabs, like a browser:
   - Double-click a thumb to open it, Ctrl+double-click or middle-click to open it in the background.
   - In an image tab: ←/→ walk the grid, PgUp/PgDn flip pages, D download, F favorite, Esc back to the grid, Ctrl+W close, Ctrl+Tab cycle.
   - Image tabs keep their picture when the grid reloads.
+  - Opening an image downloads its original into `{download dir}/cache/` and shows it from there. The next image in the grid is fetched ahead, so → is instant. **`cache/` is deleted when the app closes.**
+  - ♥ moves the post's originals into `{download dir}/favorites/`, next to `cache/`, and downloads any pages you haven't opened yet. Un-♥ moves them back to `cache/`. The ⬇ Download button copies from either folder instead of downloading again.
 
 Top tabs:
 - **Tags**: browse Danbooru tags (or Gelbooru / R34) by category, count, name or date, with a Pixiv-name column. Pick **Pools** for Danbooru pools. Selecting a tag shows its wiki, Pixiv names and related tags. Double-click opens it in a tab.

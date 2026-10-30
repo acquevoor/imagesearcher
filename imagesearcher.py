@@ -573,6 +573,58 @@ def dest(root, post, i, query):
     return Path(root) / post["site"] / folder / f"{post['site']}_{post['id']}{page}{name.suffix}"
 
 
+CACHE_MARK = ".imagesearcher-cache"  # only a cache/ holding this file is ever deleted
+CACHE_ROOTS = set()  # download dirs used this session, their cache/ goes on exit
+
+
+def local(root, post, i, folder):
+    """Original i of post in <download dir>/<folder>/ ("cache" or "favorites")."""
+    return Path(root) / folder / dest(root, post, i, "").name
+
+
+def cached(root, post, i):
+    """The original already on disk (favorites first), else None."""
+    return next((f for f in (local(root, post, i, "favorites"), local(root, post, i, "cache")) if f.exists()), None)
+
+
+def fetch_file(url, path):
+    """Download url to path once, atomically (two tabs may fetch the same file) -> path."""
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.parent.name == "cache":
+            (path.parent / CACHE_MARK).touch()
+            CACHE_ROOTS.add(path.parent.parent)
+        tmp = path.with_name(f"{path.name}.{threading.get_ident()}.part")
+        with open_url(url, timeout=120) as r, open(tmp, "wb") as f:
+            shutil.copyfileobj(r, f)
+        os.replace(tmp, path)
+    return path
+
+
+def move_favorite(root, post, fav):
+    """Favorite: cached originals move into favorites/, pages never opened get downloaded there.
+    Unfavorite: they move back to cache/, which is deleted on exit."""
+    src, dst = ("cache", "favorites") if fav else ("favorites", "cache")
+    for i, url in enumerate(post["files"]):
+        a, b = local(root, post, i, src), local(root, post, i, dst)
+        if b.exists():
+            continue
+        if a.exists():
+            b.parent.mkdir(parents=True, exist_ok=True)
+            if dst == "cache":
+                (b.parent / CACHE_MARK).touch()
+                CACHE_ROOTS.add(b.parent.parent)
+            os.replace(a, b)
+        elif fav:
+            fetch_file(url, b)
+
+
+def clear_cache(root):
+    d = Path(root) / "cache"
+    if (d / CACHE_MARK).exists():
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def download_post(post, root, query, cancel=None, conf=None):
     """-> (new, skipped)"""
     if post.get("ugoira") and conf:
@@ -587,8 +639,11 @@ def download_post(post, root, query, cancel=None, conf=None):
             continue
         d.parent.mkdir(parents=True, exist_ok=True)
         tmp = d.with_name(d.name + ".part")
-        with open_url(url, timeout=120) as r, open(tmp, "wb") as f:
-            shutil.copyfileobj(r, f)
+        if c := cached(root, post, i):  # already opened or favorited: copy instead of downloading again
+            shutil.copyfile(c, tmp)
+        else:
+            with open_url(url, timeout=120) as r, open(tmp, "wb") as f:
+                shutil.copyfileobj(r, f)
         tmp.rename(d)
         new += 1
     return new, skip
@@ -626,7 +681,8 @@ class Bridge(QObject):
         cb(res, err)
 
 
-POOLS = {"net": ThreadPoolExecutor(4), "thumb": ThreadPoolExecutor(8), "view": ThreadPoolExecutor(4)}  # view: sample + original
+POOLS = {"net": ThreadPoolExecutor(4), "thumb": ThreadPoolExecutor(8), "view": ThreadPoolExecutor(4),  # view: sample + original
+         "fav": ThreadPoolExecutor(1)}  # favorite file moves: one at a time, in click order
 bridge = None
 
 
@@ -1261,14 +1317,17 @@ class Viewer(QWidget):
         self.px_btn.setVisible(bool(p.get("pixiv_id")))
         self.like_btn.setVisible(bool(p.get("pixiv_id")))
         self.find_btn.setVisible(p["site"] == "pixiv")
-        # the sample shows fast, the original replaces it as soon as it's in (videos keep their poster)
-        sample = p["thumb"] if p["video"] else p["samples"][self.pg]
-        full = None if p["video"] or p["files"][self.pg] == sample else p["files"][self.pg]
-        key, self.pix, self.hd, self.fails = (self.pg, p["site"], p["id"]), None, False, 0
+        # the original is downloaded into cache/ (or favorites/) and shown from there; until it's in, the sample
+        # stands in. Videos keep their poster.
+        root, pg = self.main.conf["download_dir"], self.pg
+        full = None if p["video"] else p["files"][pg]
+        have = full and cached(root, p, pg)
+        folder = "favorites" if self.main.is_fav(p) else "cache"
+        key, self.pix, self.hd, self.fails = (pg, p["site"], p["id"]), None, False, 0
         self.anim.stop()
         self.frames = []
         self.img.setText("loading…")
-        self.quality.setText("loading original…" if full else "original")
+        self.quality.setText("loading original…" if full else "")
 
         def done(img, err, original):
             if not self.current(key) or self.frames or self.hd:
@@ -1282,12 +1341,15 @@ class Viewer(QWidget):
                 return
             self.pix, self.hd = QPixmap.fromImage(img), original or not full
             if original:
-                self.quality.setText(f"original {img.width()}×{img.height()}")
+                self.quality.setText(f"original {img.width()}×{img.height()}, in {folder if not have else have.parent.name}/")
             self.rescale()
-        run(lambda: QImage.fromData(http(sample)), lambda i, e: done(i, e, False), "view")
+        if not have:
+            sample = p["thumb"] if p["video"] else p["samples"][pg]
+            run(lambda: QImage.fromData(http(sample)), lambda i, e: done(i, e, False), "view")
         if full:
             # ponytail: Qt refuses to decode images over 256 MB (~8000×8000), the sample stays up then
-            run(lambda: QImage.fromData(http(full, timeout=120)), lambda i, e: done(i, e, True), "view")
+            run(lambda: QImage(str(have or fetch_file(full, local(root, p, pg, folder)))), lambda i, e: done(i, e, True), "view")
+        self.prefetch(root)
         if p.get("ugoira"):
             conf = self.main.conf
 
@@ -1296,6 +1358,13 @@ class Viewer(QWidget):
                     self.frames, self.fi = [(QPixmap.fromImage(i), d) for i, d in res], 0
                     self.next_frame()
             run(lambda: ugoira_frames(conf, p["id"]), frames, "view")
+
+    def prefetch(self, root):
+        """Pull the next post's original into cache/ so → opens it straight from disk."""
+        it = self.grid.item(self.locate() + 1)
+        n = it and it.data(Qt.UserRole)
+        if n and not n["video"] and not cached(root, n, 0):
+            run(lambda: fetch_file(n["files"][0], local(root, n, 0, "cache")), lambda r, e: None, "view")
 
     def next_frame(self):
         if self.frames and self.isVisible():
@@ -1626,6 +1695,9 @@ class Main(QMainWindow):
             log.info("favorite %s #%s", p["site"], p["id"])
         save_conf(self.conf)
         self.refresh_favs()  # open image tabs keep their own post, rows may move
+        root, fav = self.conf["download_dir"], self.is_fav(p)
+        run(lambda: move_favorite(root, p, fav),
+            lambda r, e: e and self.statusBar().showMessage(f"favorites folder: {e}"), "fav")
 
     def refresh_favs(self):
         self.favs.restart()
@@ -1831,6 +1903,23 @@ def selftest():
     assert dest("/d", px[0], 1, "blue/hair *") == Path("/d/pixiv/blue_hair _/pixiv_7_p1.png")
     assert dest("/d", db[0], 0, "") == Path("/d/danbooru/_all/danbooru_1.png")
     import tempfile
+    with tempfile.TemporaryDirectory() as root:  # cache -> favorites -> cache -> cleared, no network
+        c = local(root, px[0], 1, "cache")
+        assert c == Path(root, "cache", "pixiv_7_p1.png") and cached(root, px[0], 1) is None
+        c.parent.mkdir()
+        c.write_bytes(b"x")
+        (c.parent / CACHE_MARK).touch()
+        local(root, px[0], 0, "favorites").parent.mkdir()
+        local(root, px[0], 0, "favorites").write_bytes(b"y")  # p0 already there: no download attempted
+        move_favorite(root, px[0], True)
+        assert not c.exists() and cached(root, px[0], 1) == local(root, px[0], 1, "favorites")
+        move_favorite(root, px[0], False)
+        assert cached(root, px[0], 1) == c and cached(root, px[0], 0) == local(root, px[0], 0, "cache")
+        clear_cache(root)
+        assert not c.parent.exists() and Path(root, "favorites").exists()
+        Path(root, "cache").mkdir()  # a cache/ the app didn't make is never deleted
+        clear_cache(root)
+        assert Path(root, "cache").exists()
     with tempfile.TemporaryDirectory() as tmp:
         h = DailyHistory(tmp)
         log.setLevel(logging.INFO)
@@ -1842,6 +1931,17 @@ def selftest():
         lines = (Path(tmp) / f"{time.strftime('%Y-%m-%d')}.txt").read_text().splitlines()
         assert [l.split(" ", 2)[2] for l in lines] == ["one", "two"], lines  # same day appends, toggle off stops
     print("selftest ok")
+
+
+def shutdown(conf):
+    save_conf(conf)  # keeps the Pixiv tag cache
+    for name, pool in POOLS.items():
+        if name != "fav":
+            pool.shutdown(wait=False, cancel_futures=True)
+    POOLS["fav"].shutdown(wait=True)  # a just-clicked ♥ must leave cache/ before cache/ goes
+    # ponytail: a download still running finishes after this and lands in a fresh cache/, removed at next start
+    for root in CACHE_ROOTS | {Path(conf["download_dir"])}:
+        clear_cache(root)
 
 
 def main():
@@ -1856,7 +1956,8 @@ def main():
     app.setDesktopFileName("imagesearcher")
     bridge = Bridge()
     w = Main()
-    app.aboutToQuit.connect(lambda: save_conf(w.conf))  # keeps the Pixiv tag cache
+    clear_cache(w.conf["download_dir"])  # left over from a crash
+    app.aboutToQuit.connect(lambda: shutdown(w.conf))
     log.info("started")
     w.show()
     code = app.exec()
