@@ -34,8 +34,8 @@ except ImportError as e:  # first double-click on a plain Python install (e.g. W
     os.environ["IMAGESEARCHER_PIP_TRIED"] = "1"
     sys.exit(subprocess.call([sys.executable] + sys.argv))
 
-from PySide6.QtCore import QModelIndex, QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut, QStandardItem, QStandardItemModel
+from PySide6.QtCore import QModelIndex, QObject, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QIcon, QImage, QKeySequence, QPixmap, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QCompleter, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
@@ -86,7 +86,10 @@ def save_conf(conf):
 # ---------- logging ----------
 # Only user/app actions are logged (searches, views, downloads, favorites, settings, errors), never keys or tokens.
 log = logging.getLogger("imagesearcher")
-HISTORY_DIR = CONF_PATH.parent / "history"
+APP_DIR = Path(__file__).resolve().parent
+# next to imagesearcher.py, so it's in the same, findable place for everyone (unzipped or git-cloned);
+# a read-only install (Nix store) falls back to the config dir
+HISTORY_DIR = APP_DIR / "history" if os.access(APP_DIR, os.W_OK) else CONF_PATH.parent / "history"
 
 
 class DailyHistory(logging.Handler):
@@ -605,7 +608,8 @@ class Main(QMainWindow):
         top.addWidget(self.q, 1)
         for w in (QPushButton("Search", clicked=lambda: self.search()), self.saved, self.star,
                   QPushButton("⬇ Bulk", toolTip="Download every result of this search", clicked=self.bulk),
-                  self.history_cb, QPushButton("⚙", toolTip="Settings", clicked=self.settings)):
+                  self.history_cb, QPushButton("📂", toolTip=f"Open history folder: {HISTORY_DIR}", clicked=self.open_history),
+                  QPushButton("⚙", toolTip="Settings", clicked=self.settings)):
             top.addWidget(w)
 
         self.viewer = Viewer(self)
@@ -647,7 +651,11 @@ class Main(QMainWindow):
         self.conf["history"] = on
         save_conf(self.conf)
         set_history(on)
-        log.info("history %s", "on" if on else "off")
+        log.info("history %s (%s)", "on" if on else "off", HISTORY_DIR)
+
+    def open_history(self):
+        HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(HISTORY_DIR)))
 
     def search(self, q=None):
         self.query = (self.q.text() if q is None else q).strip()

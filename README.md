@@ -21,7 +21,7 @@ Includes a desktop entry. Without Nix: `python imagesearcher.py` with PySide6 in
 - Double-click a thumb opens the viewer: ←/→ post, PgUp/PgDn Pixiv page, D download, F favorite. Double-click a tag to search it; right-click for add / exclude / blacklist.
 - ⬇ Bulk downloads the whole query to `{download dir}/{site}/{query}/` and skips files you already have.
 - Blacklist (⚙) accepts tags plus `rating:g|s|q|e`.
-- Every action is logged in the console window. Tick **History** to also keep one log file per day in `~/.config/imagesearcher/history/`. Keys and tokens are never logged.
+- Every action is logged in the console window. Tick **History** to also keep one log file per day in the `history` folder next to `imagesearcher.py` (📂 opens it). Keys and tokens are never logged.
 - Config is `~/.config/imagesearcher/config.json` (mode 0600, holds your keys).
 
 ## Windows (no terminal needed)
