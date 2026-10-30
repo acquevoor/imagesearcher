@@ -1,8 +1,11 @@
 """Pixiv app API: refresh-token login, list sources paged by next_url (search with filters, rankings, recommended,
 follow feed, bookmarks, users, series, related), account writes (bookmark / follow) and ugoira."""
+import base64
 import hashlib
 import io
 import json
+import re
+import secrets
 import threading
 import time
 import urllib.error
@@ -16,6 +19,7 @@ UA = "PixivAndroidApp/5.0.234 (Android 11; Pixel 5)"
 CLIENT = ("MOBrBDS8blbauoSck0ZfDbtuzpyT", "lsACyCD94FhDUtGTXi3QzcFE2uU1hqtDaKeqrdwj")
 HASH = "28c1fdd170a5204386cb1313c7077b34f83e4aaf4aa829ce78c231e05b0bae2c"
 API = "https://app-api.pixiv.net/"
+LOGIN_REDIRECT = API + "web/v1/users/auth/pixiv/callback"
 NO_TOKEN = "Pixiv: paste a refresh token in Settings (see README)"
 
 TARGETS = {"Partial tags": "partial_match_for_tags", "Exact tags": "exact_match_for_tags", "Title & caption": "title_and_caption"}
@@ -53,6 +57,32 @@ def headers(conf):
                 save_conf(conf)
         return {"Authorization": "Bearer " + _auth["token"], "User-Agent": UA,
                 "App-OS": "android", "App-OS-Version": "11", "Accept-Language": "en-us"}
+
+
+def login_start():
+    """Pixiv's app login (PKCE) -> (verifier, url to open in the browser). The browser ends on
+    .../callback?state=…&code=… (then fails to open a pixiv:// link); that code buys the refresh token."""
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    return verifier, API + "web/v1/login?" + qs(code_challenge=challenge, code_challenge_method="S256", client="pixiv-android")
+
+
+def login_code(text):
+    """The one-time code out of whatever was pasted: the callback URL, the pixiv:// link, or the bare code."""
+    m = re.search(r"[?&]code=([^&#\s]+)", text)
+    return (m[1] if m else text).strip()
+
+
+def login_finish(verifier, code):
+    """Trade the code (valid for about a minute) for a refresh token."""
+    data = qs(client_id=CLIENT[0], client_secret=CLIENT[1], code=code, code_verifier=verifier, grant_type="authorization_code",
+              include_policy="true", redirect_uri=LOGIN_REDIRECT).encode()
+    try:
+        r = json.loads(http("https://oauth.secure.pixiv.net/auth/token", data=data,
+                            headers={"User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded"}))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Pixiv refused the code (HTTP {e.code}): it expires after a minute, log in again") from None
+    return r["refresh_token"]
 
 
 def logout():

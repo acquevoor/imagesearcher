@@ -107,7 +107,9 @@ To update, download the ZIP again and replace the folder (your settings are kept
   - Gelbooru and Rule34 (required): My Account → Options → *API Access Credentials*. Put `user_id` in Login and `api_key` in API key.
   - Moebooru: login + password hash (optional).
   - Philomena: your API key, plus optionally a filter id; the site's default filter hides explicit posts.
-- **Pixiv** (required for the Pixiv section): an OAuth *refresh token*. One-time setup:
-  `nix shell nixpkgs#python3Packages.pip -c pip install --user gppt && gppt login-interactive`
-  (or the browser-devtools method from https://gist.github.com/ZipFile/c9ebedb224406f4f11845ab700124362).
-  Paste the `refresh_token` into ⚙. R-18 results need R-18 enabled in your Pixiv account settings.
+- **Pixiv** (required for the Pixiv section): ⚙ → **Log in to Pixiv…**.
+  1. It opens Pixiv's login in your browser. Press F12 → Network, then click Continue.
+  2. Copy the URL of the `callback?state=…&code=…` request (right-click → Copy → Copy URL) and paste it into the app within a minute.
+  3. The app trades it for a refresh token. Press Save.
+  
+  R-18 results need R-18 enabled in your Pixiv account settings.

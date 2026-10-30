@@ -30,7 +30,12 @@ class Settings(QDialog):
         c = main.conf
         form = QFormLayout(self)
         self.token = QLineEdit(c["pixiv"]["refresh_token"], echoMode=QLineEdit.PasswordEchoOnEdit)
-        form.addRow("Pixiv refresh token", self.token)
+        self.login_status = QLabel(wordWrap=True)
+        row = QHBoxLayout()
+        row.addWidget(self.token, 1)
+        row.addWidget(QPushButton("Log in to Pixiv…", clicked=self.pixiv_login))
+        form.addRow("Pixiv refresh token", row)
+        form.addRow(self.login_status)
         self.bl = QPlainTextEdit(" ".join(c["blacklist"]), placeholderText="tags, space/newline separated; rating:e / rating:q also work")
         form.addRow("Blacklist (both sections)", self.bl)
         self.dir = QLineEdit(c["download_dir"])
@@ -43,6 +48,27 @@ class Settings(QDialog):
         form.addRow("Booru posts per page", self.limit)
         form.addRow(QLabel("Booru sites, their logins and API keys: Boorus → Sites…   Pixiv token: see README.", wordWrap=True))
         form.addRow(QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, accepted=self.accept, rejected=self.reject))
+
+    def pixiv_login(self):
+        """Fill the token by logging in through the browser: the user copies one URL back, nothing else."""
+        verifier, url = pixiv.login_start()
+        QDesktopServices.openUrl(QUrl(url))
+        text, ok = QInputDialog.getText(self, "Log in to Pixiv", (
+            "A Pixiv login page opened in your browser.\n\n"
+            "1. Press F12 there and pick the Network tab.\n"
+            "2. Click Continue (or log in). The page then tries to open a pixiv:// link; that's expected.\n"
+            "3. In Network, find the request starting with 'callback?state=' → right-click → Copy → Copy URL.\n"
+            "4. Paste it here within a minute (the bare code works too)."))
+        if not ok or not text.strip():
+            return
+        self.login_status.setText("logging in…")
+
+        def done(token, err):
+            if err:
+                return self.login_status.setText(f"<i>{err}</i>")
+            self.token.setText(token)
+            self.login_status.setText("Logged in. Save to keep the token.")
+        run(lambda: pixiv.login_finish(verifier, pixiv.login_code(text)), done)
 
     def apply(self, conf):
         if self.token.text().strip() != conf["pixiv"]["refresh_token"]:

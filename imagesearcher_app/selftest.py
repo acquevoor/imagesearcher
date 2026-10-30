@@ -141,6 +141,13 @@ def selftest():
     finally:
         pixiv.api = orig
 
+    verifier, url = pixiv.login_start()  # PKCE: the URL carries sha256(verifier), never the verifier
+    import base64, hashlib, urllib.parse  # noqa: E401
+    sent = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["code_challenge"][0]
+    assert sent == base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode() and verifier not in url
+    for pasted in ("https://app-api.pixiv.net/web/v1/users/auth/pixiv/callback?state=s&code=AbC-1_x", "pixiv://account/login?code=AbC-1_x&via=login", " AbC-1_x "):
+        assert pixiv.login_code(pasted) == "AbC-1_x", pasted
+
     # --- bridge: booru tags -> Pixiv words (offline: cache pre-filled, lookup off) ---
     conf = {"pixiv_map": {"hatsune_miku": "初音ミク", "1girl": ""}}
     assert bridge.pixiv_word(conf, None, "hatsune_miku 1girl -solo rating:g order:score re:zero_x", False) == "初音ミク"
