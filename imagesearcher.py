@@ -861,7 +861,7 @@ class TagView(Feed):
     """One tag's images: the boorus plus Pixiv through the tag bridge, with wiki header and related tags."""
 
     def __init__(self, main, tag, pixiv=None, sites=None, title=None):
-        super().__init__(main, title or tag or pixiv)
+        super().__init__(main, title or tag or pixiv or "all posts")
         self.base, self.tag, self.pixiv, self.sites, self.info = tag, tag, pixiv, sites, None
         self.head = rich_label()
         self.head.linkActivated.connect(self.link)
@@ -893,7 +893,7 @@ class TagView(Feed):
     def reload(self):
         conf, mode, sort = self.main.conf, self.src.currentText(), SORT[self.sort.currentText()]
         boorus = self.sites or [s for s in BOORUS if self.main.cb[s].isChecked()] or ["danbooru"]
-        srcs = [(s, "tags", f"{self.tag} {sort.get(s, '')}".strip()) for s in boorus] if mode != "Pixiv" and self.tag else []
+        srcs = [(s, "tags", f"{self.tag} {sort.get(s, '')}".strip()) for s in boorus] if mode != "Pixiv" and (self.tag or not self.pixiv) else []
         pq = f"{self.pixiv}{self.tag[len(self.base):]}" if self.pixiv else self.tag
         pq = f"{pq} {sort.get('pixiv', '')}".strip()
         has_token = bool(conf["pixiv"]["refresh_token"])
@@ -1509,13 +1509,14 @@ class Main(QMainWindow):
             top.addWidget(w)
 
         self.tabs = QTabWidget(tabsClosable=True)
-        self.results, self.tags_tab, self.new, self.favs = Feed(self), TagsTab(self), NewFeed(self), Grid(self.open_image)
-        for w, t in ((ImageTabs(self, self.results), "Search"), (self.tags_tab, "Tags"), (ImageTabs(self, self.new), "New"),
+        self.tags_tab, self.new, self.favs = TagsTab(self), NewFeed(self), Grid(self.open_image)
+        for w, t in ((self.tags_tab, "Tags"), (ImageTabs(self, self.new), "New"),
                      (ImageTabs(self, self.favs), "Favorites")):
             self.tabs.addTab(w, t)
             for side in (QTabBar.LeftSide, QTabBar.RightSide):  # fixed tabs: no close button
                 self.tabs.tabBar().setTabButton(self.tabs.count() - 1, side, None)
         self.tabs.tabCloseRequested.connect(self.close_tab)
+        self.tabs.currentChanged.connect(self.sync_query)
         self.tabs.setCurrentWidget(self.tags_tab)
 
         central = QWidget()
@@ -1568,7 +1569,7 @@ class Main(QMainWindow):
         if CJK.search(tag) and pixiv is None:  # a Pixiv tag: open the booru tag whose wiki lists it, Pixiv pinned
             return run(lambda: dan("wiki_pages", **{"search[other_names_match]": tag, "only": "title", "limit": 1}),
                        lambda r, e: self.open_tag(r[0]["title"] if r and not e else "", "", tag))
-        self.open_tab(f"tag:{tag}|{pixiv or ''}", tag or pixiv, lambda: TagView(self, tag, pixiv))
+        self.open_tab(f"tag:{tag}|{pixiv or ''}", tag or pixiv or "all posts", lambda: TagView(self, tag, pixiv))
 
     def open_artist(self, tag):
         self.open_tab(f"artist:{tag}", f"🎨 {tag}", lambda: ArtistView(self, tag))
@@ -1607,7 +1608,7 @@ class Main(QMainWindow):
 
     def current_feed(self):
         w = getattr(self.tabs.currentWidget(), "home", None)
-        return w if isinstance(w, Feed) else getattr(w, "booru", self.results)
+        return w if isinstance(w, Feed) else getattr(w, "booru", None)
 
     def set_new_count(self, n):
         tab = getattr(getattr(self, "new", None), "imgtabs", None)  # NewFeed reports while it is still being built
@@ -1632,14 +1633,16 @@ class Main(QMainWindow):
     def search(self, q=None):
         self.query = (self.q.text() if q is None else q).strip()
         self.q.setText(self.query)
-        sites = [s for s, c in self.cb.items() if c.isChecked()]
-        self.show_grid(self.results)
         self.star.setText("★" if self.query in self.conf["saved"] else "☆")
-        if not sites:
-            self.statusBar().showMessage("Tick at least one site")
-        else:
-            log.info("search '%s' on %s", self.query, ", ".join(sites))
-        self.results.start([(s, "tags", self.query) for s in sites], self.query)
+        log.info("search '%s'", self.query)
+        self.open_tag(self.query)  # every search gets its own top tab, its images open as tabs under it
+
+    def sync_query(self, i):
+        """The search box follows the top tab, so ☆ / Add to query / Exclude work on what you're looking at."""
+        home = getattr(self.tabs.widget(i), "home", None)
+        if isinstance(home, TagView) and ":" not in home.base:
+            self.q.setText(home.tag)
+            self.star.setText("★" if home.tag in self.conf["saved"] else "☆")
 
     # --- autocomplete ---
     def autocomplete(self):
@@ -1756,7 +1759,7 @@ class Main(QMainWindow):
         if self.cancel:
             return self.statusBar().showMessage("A bulk download is already running")
         feed = feed or self.current_feed()
-        query, srcs, keep = feed.label, list(feed.srcs), feed.keep
+        query, srcs, keep = (feed.label, list(feed.srcs), feed.keep) if feed else ("", [], None)
         if not srcs:
             return self.statusBar().showMessage("Nothing to download in this tab")
         limit, ok = QInputDialog.getInt(self, "Bulk download", f"Download '{query}' from {', '.join(dict.fromkeys(SITES[s[0]] for s in srcs))}\n"
