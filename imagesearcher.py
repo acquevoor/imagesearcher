@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import itertools
 import json
+import logging
 import os
 import re
 import shutil
@@ -58,7 +59,7 @@ DEFAULTS = {
     "rule34": {"user_id": "", "api_key": ""},
     "pixiv": {"refresh_token": ""},
     "blacklist": [], "favorites": [], "saved": [], "sites": ["danbooru"], "limit": 40,
-    "download_dir": str(Path.home() / "Pictures" / "imagesearcher"),
+    "download_dir": str(Path.home() / "Pictures" / "imagesearcher"), "history": False,
 }
 
 
@@ -80,6 +81,36 @@ def save_conf(conf):
     with os.fdopen(fd, "w") as f:
         json.dump(conf, f, indent=1)
     os.replace(tmp, CONF_PATH)
+
+
+# ---------- logging ----------
+# Only user/app actions are logged (searches, views, downloads, favorites, settings, errors), never keys or tokens.
+log = logging.getLogger("imagesearcher")
+HISTORY_DIR = CONF_PATH.parent / "history"
+
+
+class DailyHistory(logging.Handler):
+    """Appends to <dir>/YYYY-MM-DD.txt; the date is taken per line, so a session past midnight starts a new file."""
+
+    def __init__(self, folder):
+        super().__init__()
+        self.folder = Path(folder)
+        self.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
+
+    def emit(self, record):
+        try:
+            self.folder.mkdir(parents=True, exist_ok=True)
+            with open(self.folder / f"{time.strftime('%Y-%m-%d')}.txt", "a", encoding="utf-8") as f:
+                f.write(self.format(record) + "\n")
+        except Exception:
+            self.handleError(record)
+
+
+history = DailyHistory(HISTORY_DIR)
+
+
+def set_history(on):
+    (log.addHandler if on else log.removeHandler)(history)
 
 
 # ---------- network ----------
@@ -427,6 +458,8 @@ class Viewer(QDialog):
 
     def open(self, grid, row):
         self.grid = grid
+        p = grid.item(row).data(Qt.UserRole)
+        log.info("view %s #%s", p["site"], p["id"])
         self.show_row(row)
         self.show()
         self.raise_()
@@ -457,7 +490,8 @@ class Viewer(QDialog):
         self.img.setText("loading…")
 
         def done(img, err):
-            if key != (self.row, self.pg, self.post()["id"]):
+            it = self.grid.item(self.row)
+            if not it or key != (self.row, self.pg, it.data(Qt.UserRole)["id"]):  # grid cleared or moved on
                 return
             if err or img.isNull():
                 self.img.setText(f"failed: {err}")
@@ -561,13 +595,17 @@ class Main(QMainWindow):
         self.saved.activated.connect(lambda i: i and self.search(self.saved.itemText(i)))
         self.star = QPushButton("☆", toolTip="Save / unsave this search", clicked=self.toggle_saved)
 
+        self.history_cb = QCheckBox("History", checked=self.conf["history"],
+                                    toolTip=f"Also save the activity log, one text file per day, in {HISTORY_DIR}")
+        self.history_cb.toggled.connect(self.toggle_history)
+        set_history(self.conf["history"])
         top = QHBoxLayout()
         for c in self.cb.values():
             top.addWidget(c)
         top.addWidget(self.q, 1)
         for w in (QPushButton("Search", clicked=lambda: self.search()), self.saved, self.star,
                   QPushButton("⬇ Bulk", toolTip="Download every result of this search", clicked=self.bulk),
-                  QPushButton("⚙", toolTip="Settings", clicked=self.settings)):
+                  self.history_cb, QPushButton("⚙", toolTip="Settings", clicked=self.settings)):
             top.addWidget(w)
 
         self.viewer = Viewer(self)
@@ -605,17 +643,27 @@ class Main(QMainWindow):
         self.conf["sites"] = [s for s, c in self.cb.items() if c.isChecked()]
         save_conf(self.conf)
 
+    def toggle_history(self, on):
+        self.conf["history"] = on
+        save_conf(self.conf)
+        set_history(on)
+        log.info("history %s", "on" if on else "off")
+
     def search(self, q=None):
         self.query = (self.q.text() if q is None else q).strip()
         self.q.setText(self.query)
         self.gen += 1
         self.page, self.loading, self.errs = 0, False, {}
         self.active = [s for s, c in self.cb.items() if c.isChecked()]
+        if self.viewer.grid is self.results:
+            self.viewer.hide()  # its post is about to be cleared
         self.results.restart()
         self.tabs.setCurrentWidget(self.results)
         self.star.setText("★" if self.query in self.conf["saved"] else "☆")
         if not self.active:
             self.statusBar().showMessage("Tick at least one site")
+        else:
+            log.info("search '%s' on %s", self.query, ", ".join(self.active))
         self.more()
 
     def more(self):
@@ -632,9 +680,13 @@ class Main(QMainWindow):
             return
         self.loading = False
         if err:
+            log.error("search '%s' failed: %s", self.query, err)
             self.statusBar().showMessage(str(err))
             return
         lists, errs = res
+        for s, e in errs.items():
+            if s not in self.errs:
+                log.warning(e)
         self.errs.update(errs)  # sticky: a site that failed on page 1 stays explained
         self.active = [s for s in self.active if lists[s]]  # drop exhausted/broken sites from paging
         bl = set(self.conf["blacklist"])
@@ -647,6 +699,7 @@ class Main(QMainWindow):
         if not self.active:
             msg += "  — end of results"
         self.statusBar().showMessage(msg)
+        log.info("'%s' page %d: %s", self.query, self.page, counts)
         if self.active and self.results.verticalScrollBar().maximum() == 0:
             QTimer.singleShot(0, self.more)  # page didn't fill the window
 
@@ -686,6 +739,7 @@ class Main(QMainWindow):
             return
         s = self.conf["saved"]
         s.remove(q) if q in s else s.append(q)
+        log.info("saved search %s '%s'", "added" if q in s else "removed", q)
         save_conf(self.conf)
         self.refresh_saved()
         self.star.setText("★" if q in s else "☆")
@@ -697,8 +751,10 @@ class Main(QMainWindow):
         favs = self.conf["favorites"]
         if self.is_fav(p):
             favs[:] = [f for f in favs if not (f["site"] == p["site"] and f["id"] == p["id"])]
+            log.info("unfavorite %s #%s", p["site"], p["id"])
         else:
             favs.insert(0, p)
+            log.info("favorite %s #%s", p["site"], p["id"])
         save_conf(self.conf)
         if self.viewer.grid is not self.favs:  # don't pull rows out from under an open viewer
             self.refresh_favs()
@@ -711,14 +767,18 @@ class Main(QMainWindow):
     def blacklist_add(self, tag):
         self.conf["blacklist"] = sorted(set(self.conf["blacklist"]) | {tag.lower()})
         save_conf(self.conf)
+        log.info("blacklist + %s", tag)
         self.statusBar().showMessage(f"Blacklisted '{tag}' (applies to new searches)")
 
     # --- downloads ---
     def download(self, p):
         query, root = self.query, self.conf["download_dir"]
         self.statusBar().showMessage(f"Downloading {SITES[p['site']]} #{p['id']}…")
-        run(lambda: download_post(p, root, query),
-            lambda r, e: self.statusBar().showMessage(f"#{p['id']}: {e}" if e else f"#{p['id']}: saved {r[0]}, already had {r[1]}"))
+        def done(r, e):
+            msg = f"download {p['site']} #{p['id']}: " + (f"failed: {e}" if e else f"saved {r[0]}, already had {r[1]}")
+            (log.error if e else log.info)(msg)
+            self.statusBar().showMessage(msg)
+        run(lambda: download_post(p, root, query), done)
 
     def bulk(self):
         if self.cancel:
@@ -732,6 +792,7 @@ class Main(QMainWindow):
         if not ok:
             return
         self.cancel = cancel = threading.Event()
+        log.info("bulk '%s' on %s, max %s", query, ", ".join(sites), limit or "all")
         self.cancel_btn.show()
         conf, bl, root = self.conf, set(self.conf["blacklist"]), self.conf["download_dir"]
 
@@ -768,8 +829,11 @@ class Main(QMainWindow):
             self.cancel = None
             self.cancel_btn.hide()
             if err:
+                log.error("bulk '%s' failed: %s", query, err)
                 return self.statusBar().showMessage(f"Bulk failed: {err}")
             progress(st, None)
+            log.info("bulk '%s' %s: %d new, %d skipped, %d failed", query, "cancelled" if cancel.is_set() else "done",
+                     st["new"], st["skip"], st["fail"])
             self.statusBar().showMessage(self.statusBar().currentMessage() + ("  — cancelled" if cancel.is_set() else "  — done"))
 
         threading.Thread(target=lambda: self._bulk_thread(work, finished), daemon=True).start()
@@ -786,6 +850,7 @@ class Main(QMainWindow):
         if d.exec():
             d.apply(self.conf)
             save_conf(self.conf)
+            log.info("settings saved")
             self.statusBar().showMessage("Settings saved")
 
 
@@ -827,6 +892,17 @@ def selftest():
 
     assert dest("/d", px[0], 1, "blue/hair *") == Path("/d/pixiv/blue_hair _/pixiv_7_p1.png")
     assert dest("/d", db[0], 0, "") == Path("/d/danbooru/_all/danbooru_1.png")
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        h = DailyHistory(tmp)
+        log.setLevel(logging.INFO)
+        log.addHandler(h)
+        log.info("one")
+        log.info("two")
+        log.removeHandler(h)
+        log.info("not saved")
+        lines = (Path(tmp) / f"{time.strftime('%Y-%m-%d')}.txt").read_text().splitlines()
+        assert [l.split(" ", 2)[2] for l in lines] == ["one", "two"], lines  # same day appends, toggle off stops
     print("selftest ok")
 
 
@@ -834,13 +910,19 @@ def main():
     global bridge
     if "--selftest" in sys.argv:
         return selftest()
+    if sys.stderr:  # console window / terminal; absent under pythonw
+        logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+    log.setLevel(logging.INFO)
     app = QApplication(sys.argv)
     app.setApplicationName("imagesearcher")
     app.setDesktopFileName("imagesearcher")
     bridge = Bridge()
     w = Main()
+    log.info("started")
     w.show()
-    sys.exit(app.exec())
+    code = app.exec()
+    log.info("quit")
+    sys.exit(code)
 
 
 if __name__ == "__main__":
