@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""imagesearcher: Danbooru-first tag / artist browser and downloader, with Gelbooru, Rule34.xxx and Pixiv folded in."""
+"""imagesearcher: booru-first (Danbooru, Gelbooru, Rule34.xxx) tag / artist browser and downloader, with Pixiv folded in."""
 import functools
 import hashlib
 import html

@@ -1,6 +1,6 @@
 # imagesearcher
 
-Danbooru-first tag / artist browser and downloader, with Gelbooru, Rule34.xxx and Pixiv folded in. One file, PySide6 + stdlib.
+Booru-first tag / artist browser and downloader for Danbooru, Gelbooru and Rule34.xxx, with Pixiv folded in. One file, PySide6 + stdlib.
 
     nix run github:acquevoor/imagesearcher
     nix flake check            # runs the offline --selftest
@@ -17,7 +17,7 @@ home.packages = [ inputs.imagesearcher.packages.${pkgs.stdenv.hostPlatform.syste
 
 Includes a desktop entry. Without Nix: `python imagesearcher.py` with PySide6 installed.
 
-Danbooru is the backbone, and Pixiv is reached through it:
+The boorus (Danbooru, Gelbooru, Rule34) are the backbone. Pixiv is reached through booru metadata; Danbooru supplies the wiki and artist data, because it is the only one of the three with those APIs:
 - A booru tag is sent to Pixiv as its Pixiv name, taken from the tag's Danbooru wiki (`hatsune_miku` → `初音ミク`). The status line shows `PX via "…"`.
 - Clicking a Japanese Pixiv tag opens the booru tag whose wiki lists it.
 - Artists are linked through Danbooru's artist URLs.
