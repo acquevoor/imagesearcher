@@ -5,7 +5,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import boorus, bridge, core, pixiv
+from . import boorus, bridge, core, keys, pixiv
 from .booru_ui import follow_srcs
 from .core import CACHE_MARK, cached, clear_cache, dest, fold, interleave, local, move_favorite, preset, rating_ok, allowed
 
@@ -147,6 +147,27 @@ def selftest():
     assert sent == base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode() and verifier not in url
     for pasted in ("https://app-api.pixiv.net/web/v1/users/auth/pixiv/callback?state=s&code=AbC-1_x", "pixiv://account/login?code=AbC-1_x&via=login", " AbC-1_x "):
         assert pixiv.login_code(pasted) == "AbC-1_x", pasted
+
+    # --- key fetcher ---
+    page = "API Access Credentials … <p>&amp;api_key=" + "a1" * 20 + "&amp;user_id=9455</p>"
+    assert keys.parse_creds(page) == ("9455", "a1" * 20) and keys.parse_creds("&api_key=&user_id=9455") is None and keys.parse_creds(None) is None
+    kc = core.migrate(json.loads(json.dumps(v1)))
+    kc["boorus"] = [{**core.SITE_FIELDS, **s} for s in kc["boorus"]]
+    assert keys.missing(kc) == ["rule34"]  # gelbooru has user id 5 + key g; pixiv has token t
+    kc["boorus"] = [s for s in kc["boorus"] if s["id"] != "rule34"]
+    kc["pixiv"]["refresh_token"] = ""
+    assert keys.missing(kc) == ["rule34", "pixiv"]
+    saved = []
+    orig_save = keys.save_conf
+    keys.save_conf = saved.append
+    try:
+        keys.store(kc, "rule34", ("77", "f" * 40))
+        keys.store(kc, "pixiv", "tok")
+    finally:
+        keys.save_conf = orig_save
+    r = keys.site(kc, "rule34")
+    assert r["on"] and r["login"] == "77" and r["api_url"] == "https://api.rule34.xxx" and kc["pixiv"]["refresh_token"] == "tok"
+    assert keys.missing(kc) == [] and len(saved) == 2
 
     # --- bridge: booru tags -> Pixiv words (offline: cache pre-filled, lookup off) ---
     conf = {"pixiv_map": {"hatsune_miku": "初音ミク", "1girl": ""}}

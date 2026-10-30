@@ -4,7 +4,7 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog,
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 
 from . import core, pixiv
 from .booru_ui import BooruSection
+from .keys import KeysDialog, missing
 from .core import (
     HISTORY_DIR, NAMES, allowed, clear_cache, download_post, fetch_all, interleave, load_conf, log, move_favorite, run,
     same, save_conf, set_history, to_ui,
@@ -30,12 +31,10 @@ class Settings(QDialog):
         c = main.conf
         form = QFormLayout(self)
         self.token = QLineEdit(c["pixiv"]["refresh_token"], echoMode=QLineEdit.PasswordEchoOnEdit)
-        self.login_status = QLabel(wordWrap=True)
         row = QHBoxLayout()
         row.addWidget(self.token, 1)
-        row.addWidget(QPushButton("Log in to Pixiv…", clicked=self.pixiv_login))
+        row.addWidget(QPushButton("Fetch keys…", toolTip="Log in to Gelbooru / Rule34 / Pixiv and save their keys", clicked=self.fetch_keys))
         form.addRow("Pixiv refresh token", row)
-        form.addRow(self.login_status)
         self.bl = QPlainTextEdit(" ".join(c["blacklist"]), placeholderText="tags, space/newline separated; rating:e / rating:q also work")
         form.addRow("Blacklist (both sections)", self.bl)
         self.dir = QLineEdit(c["download_dir"])
@@ -46,29 +45,14 @@ class Settings(QDialog):
         form.addRow("Download dir", row)
         self.limit = QSpinBox(minimum=10, maximum=100, value=c["limit"])
         form.addRow("Booru posts per page", self.limit)
-        form.addRow(QLabel("Booru sites, their logins and API keys: Boorus → Sites…   Pixiv token: see README.", wordWrap=True))
+        form.addRow(QLabel("Gelbooru / Rule34 / Pixiv keys: Fetch keys…   Other sites' logins and keys: Boorus → Sites…", wordWrap=True))
         form.addRow(QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, accepted=self.accept, rejected=self.reject))
 
-    def pixiv_login(self):
-        """Fill the token by logging in through the browser: the user copies one URL back, nothing else."""
-        verifier, url = pixiv.login_start()
-        QDesktopServices.openUrl(QUrl(url))
-        text, ok = QInputDialog.getText(self, "Log in to Pixiv", (
-            "A Pixiv login page opened in your browser.\n\n"
-            "1. Press F12 there and pick the Network tab.\n"
-            "2. Click Continue (or log in). The page then tries to open a pixiv:// link; that's expected.\n"
-            "3. In Network, find the request starting with 'callback?state=' → right-click → Copy → Copy URL.\n"
-            "4. Paste it here within a minute (the bare code works too)."))
-        if not ok or not text.strip():
-            return
-        self.login_status.setText("logging in…")
-
-        def done(token, err):
-            if err:
-                return self.login_status.setText(f"<i>{err}</i>")
-            self.token.setText(token)
-            self.login_status.setText("Logged in. Save to keep the token.")
-        run(lambda: pixiv.login_finish(verifier, pixiv.login_code(text)), done)
+    def fetch_keys(self):
+        """The key fetcher; afterwards the token field shows what it saved, so Save can't put the old one back."""
+        d = KeysDialog(self.parent())
+        d.finished.connect(lambda _: self.token.setText(self.parent().conf["pixiv"]["refresh_token"]))
+        d.open()
 
     def apply(self, conf):
         if self.token.text().strip() != conf["pixiv"]["refresh_token"]:
@@ -247,6 +231,7 @@ def main():
     if sys.stderr:  # console window / terminal; absent under pythonw
         logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
     log.setLevel(logging.INFO)
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)  # the key fetcher's web view needs it, set before the app exists
     app = QApplication(sys.argv)
     app.setApplicationName("imagesearcher")
     app.setDesktopFileName("imagesearcher")
@@ -256,6 +241,8 @@ def main():
     app.aboutToQuit.connect(lambda: core.shutdown(w.conf))
     log.info("started")
     w.show()
+    if w.conf["keys_prompt"] and missing(w.conf):  # offered on every launch while a key is empty, unless switched off
+        QTimer.singleShot(0, lambda: KeysDialog(w).show())
     code = app.exec()
     log.info("quit")
     sys.exit(code)

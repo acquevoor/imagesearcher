@@ -102,14 +102,21 @@ Settings and favorites are saved in `C:\Users\<you>\.config\imagesearcher\`, and
 To update, download the ZIP again and replace the folder (your settings are kept).
 
 ## Credentials
+**Gelbooru, Rule34 and Pixiv: the key fetcher.**
+- It opens on launch while any of their keys is missing. Tick **Don't show this again** to stop that; it stays under ⚙ → **Fetch keys…**.
+- **Fetch…** opens the site's own login in a small window. Log in, solving the CAPTCHA if one shows.
+- The app then reads the API key + user id from your account page, or catches Pixiv's login token, checks it, and saves it.
+- Your password goes only to the site. The window keeps no cookies.
+- If your Gelbooru / Rule34 account has no key yet, tick *Generate new key* on the page it shows, then Save.
+
+Doing it by hand instead:
 - **Booru sites** (Boorus → Sites… → Edit):
   - Danbooru and e621: login + API key (My Account → API Key). Optional, but it lifts Danbooru's 2-tag limit and shows e621 posts hidden from guests.
   - Gelbooru and Rule34 (required): My Account → Options → *API Access Credentials*. Put `user_id` in Login and `api_key` in API key.
   - Moebooru: login + password hash (optional).
   - Philomena: your API key, plus optionally a filter id; the site's default filter hides explicit posts.
-- **Pixiv** (required for the Pixiv section): ⚙ → **Log in to Pixiv…**.
-  1. It opens Pixiv's login in your browser. Press F12 → Network, then click Continue.
-  2. Copy the URL of the `callback?state=…&code=…` request (right-click → Copy → Copy URL) and paste it into the app within a minute.
-  3. The app trades it for a refresh token. Press Save.
+- **Pixiv** (required for the Pixiv section): use the key fetcher above. Without a built-in browser (a PySide6 build lacking QtWebEngine), Fetch… opens your browser instead:
+  1. Press F12 → Network, then click Continue.
+  2. Copy the URL of the `callback?state=…&code=…` request and paste it into the app within a minute.
   
   R-18 results need R-18 enabled in your Pixiv account settings.

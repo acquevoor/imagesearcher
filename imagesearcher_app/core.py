@@ -51,6 +51,7 @@ DEFAULTS = {
     "pixiv": {"refresh_token": "", "user_id": "", "premium": False, "follow_seen": 0},
     "blacklist": [], "favorites": [], "saved": [], "px_saved": [], "limit": 40,
     "download_dir": str(Path.home() / "Pictures" / "imagesearcher"), "history": False, "section": "boorus",
+    "keys_prompt": True,  # offer the key fetcher on launch while Gelbooru / Rule34 / Pixiv keys are missing
     "follows": {},  # "tag:x" / "artist:x" -> {booru site id: last seen post id}
     "pixiv_map": {},  # booru tag -> Pixiv tag from its wiki ("" = none known)
 }
