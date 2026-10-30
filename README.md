@@ -2,8 +2,20 @@
 
 Desktop browser/downloader for Danbooru, Gelbooru, Rule34.xxx and Pixiv. One file, PySide6 + stdlib.
 
-    imagesearcher              # launched via the flake wrapper
-    imagesearcher --selftest   # offline parser/merge/blacklist checks
+    nix run github:acquevoor/imagesearcher
+    nix flake check            # runs the offline --selftest
+
+## Install via flake
+
+```nix
+# flake.nix
+inputs.imagesearcher.url = "github:acquevoor/imagesearcher";
+
+# home-manager (or environment.systemPackages)
+home.packages = [ inputs.imagesearcher.packages.${pkgs.stdenv.hostPlatform.system}.default ];
+```
+
+Includes a desktop entry. Without Nix: `python imagesearcher.py` with PySide6 installed.
 
 - Tick sites, type tags, Enter. Several sites = merged, interleaved results. Scroll for more.
 - Double-click a thumb opens the viewer: ←/→ post, PgUp/PgDn Pixiv page, D download, F favorite. Double-click a tag to search it; right-click for add / exclude / blacklist.
