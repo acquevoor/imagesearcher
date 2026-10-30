@@ -626,7 +626,7 @@ class Bridge(QObject):
         cb(res, err)
 
 
-POOLS = {"net": ThreadPoolExecutor(4), "thumb": ThreadPoolExecutor(8), "view": ThreadPoolExecutor(2)}
+POOLS = {"net": ThreadPoolExecutor(4), "thumb": ThreadPoolExecutor(8), "view": ThreadPoolExecutor(4)}  # view: sample + original
 bridge = None
 
 
@@ -1194,13 +1194,13 @@ class Viewer(QWidget):
         self.find_btn = btn("Find on Danbooru", self.find_booru)
         self.like_btn = btn("More like this (Pixiv)", lambda: self.main.open_feed(
             f"related:{self.p['pixiv_id']}", f"like PX {self.p['pixiv_id']}", [("pixiv", "related", self.p["pixiv_id"])]))
-        self.pages = QLabel()
+        self.pages, self.quality = QLabel(), QLabel(wordWrap=True)
         nav = QHBoxLayout()
         for w in (btn("◀", lambda: self.step(-1)), btn("▶", lambda: self.step(1))):
             nav.addWidget(w)
         side = QVBoxLayout()
         side.addLayout(nav)
-        for w in (self.pages, self.info, QLabel("Tags (double-click = open tab, right-click = more)"), self.tags,
+        for w in (self.pages, self.info, self.quality, QLabel("Tags (double-click = open tab, right-click = more)"), self.tags,
                   btn("⬇ Download (D)", self.download), self.fav, self.play, self.px_btn, self.find_btn, self.like_btn,
                   btn("Open page", lambda: webbrowser.open(self.p["page"]))):
             side.addWidget(w)
@@ -1261,21 +1261,33 @@ class Viewer(QWidget):
         self.px_btn.setVisible(bool(p.get("pixiv_id")))
         self.like_btn.setVisible(bool(p.get("pixiv_id")))
         self.find_btn.setVisible(p["site"] == "pixiv")
-        url = p["thumb"] if p["video"] else p["samples"][self.pg]
-        key, self.pix = (self.pg, p["site"], p["id"]), None
+        # the sample shows fast, the original replaces it as soon as it's in (videos keep their poster)
+        sample = p["thumb"] if p["video"] else p["samples"][self.pg]
+        full = None if p["video"] or p["files"][self.pg] == sample else p["files"][self.pg]
+        key, self.pix, self.hd, self.fails = (self.pg, p["site"], p["id"]), None, False, 0
         self.anim.stop()
         self.frames = []
         self.img.setText("loading…")
+        self.quality.setText("loading original…" if full else "original")
 
-        def done(img, err):
-            if not self.current(key) or self.frames:
+        def done(img, err, original):
+            if not self.current(key) or self.frames or self.hd:
                 return
-            if err or img.isNull():
-                self.img.setText(f"failed: {err}")
-            else:
-                self.pix = QPixmap.fromImage(img)
-                self.rescale()
-        run(lambda: QImage.fromData(http(url)), done, "view")
+            if err or img is None or img.isNull():
+                self.fails += 1
+                if original:
+                    self.quality.setText(f"original failed{': ' + str(err) if err else ''} — showing the sample")
+                if not self.pix and self.fails == (2 if full else 1):
+                    self.img.setText(f"failed: {err}")
+                return
+            self.pix, self.hd = QPixmap.fromImage(img), original or not full
+            if original:
+                self.quality.setText(f"original {img.width()}×{img.height()}")
+            self.rescale()
+        run(lambda: QImage.fromData(http(sample)), lambda i, e: done(i, e, False), "view")
+        if full:
+            # ponytail: Qt refuses to decode images over 256 MB (~8000×8000), the sample stays up then
+            run(lambda: QImage.fromData(http(full, timeout=120)), lambda i, e: done(i, e, True), "view")
         if p.get("ugoira"):
             conf = self.main.conf
 
