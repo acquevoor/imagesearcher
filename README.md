@@ -1,6 +1,19 @@
 # imagesearcher
 
-Booru-first tag / artist browser and downloader for Danbooru, Gelbooru and Rule34.xxx, with Pixiv folded in. One file, PySide6 + stdlib.
+Browser and downloader in two sections:
+- **Boorus**: search any number of booru sites together. Any site running one of the supported engines can be added by URL:
+
+  | Engine | For example |
+  |---|---|
+  | Danbooru | danbooru, aibooru |
+  | Gelbooru 0.2 | gelbooru, rule34.xxx, safebooru.org, xbooru, tbib |
+  | Moebooru | konachan, yande.re, sakugabooru |
+  | e621 | e621, e926 |
+  | Philomena | derpibooru, furbooru |
+
+- **Pixiv**: Pixiv's own search filters, rankings, trending tags, recommended, the works of artists you follow, your bookmarks, and artist / series pages, with bookmark and follow buttons that act on your account.
+
+PySide6 + Python stdlib.
 
     nix run github:acquevoor/imagesearcher
     nix flake check            # runs the offline --selftest
@@ -15,41 +28,70 @@ inputs.imagesearcher.url = "github:acquevoor/imagesearcher";
 home.packages = [ inputs.imagesearcher.packages.${pkgs.stdenv.hostPlatform.system}.default ];
 ```
 
-Includes a desktop entry. Without Nix: `python imagesearcher.py` with PySide6 installed.
+Includes a desktop entry. Without Nix: `python imagesearcher.py` with PySide6 installed. The app lives in the `imagesearcher_app/` folder next to it.
 
-The boorus (Danbooru, Gelbooru, Rule34) are the backbone. Pixiv is reached through booru metadata; Danbooru supplies the wiki and artist data, because it is the only one of the three with those APIs:
-- A booru tag is sent to Pixiv as its Pixiv name, taken from the tag's Danbooru wiki (`hatsune_miku` → `初音ミク`). The status line shows `PX via "…"`.
-- Clicking a Japanese Pixiv tag opens the booru tag whose wiki lists it.
-- Artists are linked through Danbooru's artist URLs.
-- The same image found on two sites shows as one tile (`DB+PX`). The booru copy wins because its tags are better.
+## The window
 
-Two rows of tabs, like a browser:
-- **Top row**: one tab per search or tag (`hatsune_miku`, `kasane_teto alternative_clothes`, …), plus artists, pools, Tags, New and Favorites. Searching the same thing again switches to its tab.
+**Boorus | Pixiv** at the top switches section (Ctrl+1 / Ctrl+2). Each section has its own search bar and two rows of tabs, like a browser:
+- **Top row**: one tab per search, tag, artist, pool or Pixiv user, plus the section's fixed tabs. Searching the same thing again switches to its tab.
 - **Second row**: inside each top tab, its ▦ Grid plus one tab per image you open.
   - Double-click a thumb to open it, Ctrl+double-click or middle-click to open it in the background.
   - In an image tab: ←/→ walk the grid, PgUp/PgDn flip pages, D download, F favorite, Esc back to the grid, Ctrl+W close, Ctrl+Tab cycle.
-  - Image tabs keep their picture when the grid reloads.
-  - Opening an image downloads its original into `{download dir}/cache/` and shows it from there. The next image in the grid is fetched ahead, so → is instant. **`cache/` is deleted when the app closes.**
-  - ♥ moves the post's originals into `{download dir}/favorites/`, next to `cache/`, and downloads any pages you haven't opened yet. Un-♥ moves them back to `cache/`. The ⬇ Download button copies from either folder instead of downloading again.
+  - Multi-page works get **▤ Strip view**: all pages stacked to scroll through, for manga.
+  - Opening an image downloads its original into `{download dir}/cache/` and shows it from there. The next image is fetched ahead, so → is instant. **`cache/` is deleted when the app closes.**
+  - ♥ moves the post's originals into `{download dir}/favorites/`, next to `cache/`, and downloads any pages you haven't opened. Un-♥ moves them back to `cache/`.
 
-Top tabs:
-- **Tags**: browse Danbooru tags (or Gelbooru / R34) by category, count, name or date, with a Pixiv-name column. Pick **Pools** for Danbooru pools. Selecting a tag shows its wiki, Pixiv names and related tags. Double-click opens it in a tab.
-- **Tag tabs**: one per tag, closable. They show the boorus and Pixiv side by side, or one of them, sorted newest / score (Pixiv popular) / random, filtered by rating. Click a related tag to narrow the tab, Ctrl+click to open it in its own tab. Click a Pixiv name to pin the Pixiv side to that word.
-- **Artist tabs** (artist tags, shown red): the booru posts next to the artist's Pixiv works. Works already on Danbooru are marked ✓DB. Tick the checkbox to show only the ones that are missing.
-- **New**: ☆ Follow a tag or an artist, and their posts newer than the last ones you saw collect here, with an unread count on the tab. ✓ Mark all seen resets it. The tab checks every 15 min while the app runs.
-- **Favorites**.
+## Boorus
 
-- Image tabs: tags are coloured by category. Double-click a tag to open its tab; right-click for search / add / exclude / follow / blacklist. On Pixiv posts: *Find on Danbooru*, *More like this*. Pixiv animations (ugoira) play in place and download as frames `.zip` + delays `.json`.
-- ⬇ Bulk downloads everything in the current tab to `{download dir}/{site}/{tab}/` and skips files you already have.
+- **Site bar**: tick the sites to search. Results interleave and the same file on several sites shows once, labelled with every site, e.g. `KC+SB+DB 410185`.
+- **Sites…**: add a site from the presets, or paste any URL and press **Detect**, which finds the engine and, for rule34, the separate API host. Edit names, tile labels and keys, and use ↑/↓ to set the order. The order is the interleave order, and the first site with a wiki supplies tag wikis.
+- **Tag tabs**:
+  - a header with the tag's wiki, other names and related tags (click one to narrow the tab, Ctrl+click to open it in its own tab)
+  - sort by newest / score / random, and filter by rating g / s / q / e
+  - ☆ Follow, and **Search on Pixiv** (once a Pixiv token is set)
+- **Artist tabs** (artist tags, red): the artist's posts plus their links. **Pixiv account** opens their Pixiv page in the Pixiv section.
+- **Tags**: browse a site's tags by category, count, name or date. A Pixiv column shows each tag's Japanese name. **Pools** lists pools on sites that have them.
+- **New**: posts newer than the last ones you saw, for every tag or artist you follow, with an unread count. **Favorites**.
+- What each site offers depends on its engine:
+  - Danbooru and e621: wikis, related tags, pools, artists
+  - Moebooru: the same, without other names
+  - Gelbooru 0.2: tags only
+  - Philomena: tags only. Its tags show with `_` in the app and are translated back to its `a, b` query syntax.
 - An anonymous Danbooru search allows only 2 tags, and `order:` counts as one. A Danbooru API key raises the limit.
-- Blacklist (⚙) accepts tags plus `rating:g|s|q|e`.
+
+## Pixiv
+
+- **Search** opens a tab per query. **Filters ▾** offers:
+  - match mode: partial tags / exact tags / title & caption
+  - sort: newest / oldest / popular. Popular needs Premium; without it Pixiv's one-page popular preview is used and the tab says so.
+  - type: illust / manga
+  - R-18: show / hide / only
+  - AI works on/off
+  - a minimum number of bookmarks
+  - a date range
+- **Rankings** (daily … monthly, male / female, original, rookie, AI, manga, and the R-18 ones, for any past date), **Trending** tags, **Recommended**.
+- **Following**: new works from the artists you follow, with an unread count. **Bookmarks**: yours, public or private.
+- Image tabs:
+  - ☆ **Bookmark on Pixiv** / ★ Unbookmark
+  - 👤 the artist's tab (works / manga / bookmarks, + Follow / ✓ Following)
+  - ▤ the work's series
+  - **More like this**
+  - **Find on boorus**: the booru copies, usually better tagged
+  - animations (ugoira) play in place and download as frames `.zip` + delays `.json`
+- The local ♥ Favorite (files on disk) is separate from the Pixiv bookmark.
+- A Pixiv tag's right-click menu has **Open on boorus**: the booru tag whose wiki lists that Japanese name.
+
+## Everything else
+
+- ⬇ Bulk downloads everything in the current tab to `{download dir}/{site}/{tab}/` and skips files you already have.
+- Blacklist (⚙) applies to both sections and accepts tags plus `rating:g|s|q|e`.
 - Every action is logged in the console window. Tick **History** to also keep one log file per day in the `history` folder next to `imagesearcher.py` (📂 opens it). Keys and tokens are never logged.
-- Config is `~/.config/imagesearcher/config.json` (mode 0600, holds your keys).
+- Config is `~/.config/imagesearcher/config.json` (mode 0600, holds your keys). A config from version 1 is converted on first start; the old file is kept as `config.v1.json`.
 
 ## Windows (no terminal needed)
 1. Install Python from https://www.python.org/downloads/ . In the installer, tick **"Add python.exe to PATH"** and click *Install Now*.
 2. On this GitHub page click the green **Code** button → **Download ZIP**, then right-click the ZIP → **Extract All**.
-3. Double-click **`imagesearcher.py`** in the extracted folder.
+3. Double-click **`imagesearcher.py`** in the extracted folder. Keep the `imagesearcher_app` folder next to it.
    - The first start installs PySide6 by itself (a black window shows progress for a minute or two). Later starts open right away.
    - If Windows asks which app should open the file, choose **Python**.
    - Leave the black window open while you use the app; closing it closes the app.
@@ -60,9 +102,12 @@ Settings and favorites are saved in `C:\Users\<you>\.config\imagesearcher\`, and
 To update, download the ZIP again and replace the folder (your settings are kept).
 
 ## Credentials
-- **Rule34 / Gelbooru** (required): My Account → Options → *API Access Credentials* → copy `api_key` and `user_id` into ⚙.
-- **Danbooru** (optional, needed for >2 tags): My Account → API Key.
-- **Pixiv** (required): needs an OAuth *refresh token*. One-time setup:
+- **Booru sites** (Boorus → Sites… → Edit):
+  - Danbooru and e621: login + API key (My Account → API Key). Optional, but it lifts Danbooru's 2-tag limit and shows e621 posts hidden from guests.
+  - Gelbooru and Rule34 (required): My Account → Options → *API Access Credentials*. Put `user_id` in Login and `api_key` in API key.
+  - Moebooru: login + password hash (optional).
+  - Philomena: your API key, plus optionally a filter id; the site's default filter hides explicit posts.
+- **Pixiv** (required for the Pixiv section): an OAuth *refresh token*. One-time setup:
   `nix shell nixpkgs#python3Packages.pip -c pip install --user gppt && gppt login-interactive`
   (or the browser-devtools method from https://gist.github.com/ZipFile/c9ebedb224406f4f11845ab700124362).
   Paste the `refresh_token` into ⚙. R-18 results need R-18 enabled in your Pixiv account settings.

@@ -1,5 +1,5 @@
 {
-  description = "Desktop browser/downloader for Danbooru, Gelbooru, Rule34.xxx and Pixiv";
+  description = "Booru (any site) and Pixiv browser and downloader";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
