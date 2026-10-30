@@ -17,6 +17,20 @@ import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+try:
+    import PySide6.QtWidgets  # noqa: F401
+except ImportError as e:  # first double-click on a plain Python install (e.g. Windows): fetch PySide6, then restart
+    # one attempt only: if the fresh install still can't import, a restart loop would fork-bomb the machine
+    if os.environ.get("IMAGESEARCHER_PIP_TRIED"):
+        input(f"PySide6 is installed but can't load: {e}\nPress Enter to close.")
+        sys.exit(1)
+    print("First run: installing PySide6, this takes a minute or two. Keep this window open...")
+    if subprocess.call([sys.executable, "-m", "pip", "install", "PySide6"]):
+        input("Installing PySide6 failed (see above). Press Enter to close.")
+        sys.exit(1)
+    os.environ["IMAGESEARCHER_PIP_TRIED"] = "1"
+    sys.exit(subprocess.call([sys.executable] + sys.argv))
+
 from PySide6.QtCore import QModelIndex, QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
@@ -470,7 +484,10 @@ class Viewer(QDialog):
     def play_video(self):
         p = self.post()
         url = next((u for u in p["samples"] + p["files"] if Path(urllib.parse.urlparse(u).path).suffix in (".mp4", ".webm")), p["files"][0])
-        subprocess.Popen(["mpv", f"--referrer={PIXIV_REFERER}" if p["site"] == "pixiv" else "--", url])
+        try:
+            subprocess.Popen(["mpv", f"--referrer={PIXIV_REFERER}" if p["site"] == "pixiv" else "--", url])
+        except FileNotFoundError:  # no mpv (typical on Windows): let the browser play it
+            webbrowser.open(p["page"])
 
     def tag_menu(self, pos):
         it = self.tags.itemAt(pos)

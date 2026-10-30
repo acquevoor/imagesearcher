@@ -23,6 +23,19 @@ Includes a desktop entry. Without Nix: `python imagesearcher.py` with PySide6 in
 - Blacklist (⚙) accepts tags plus `rating:g|s|q|e`.
 - Config is `~/.config/imagesearcher/config.json` (mode 0600, holds your keys).
 
+## Windows (no terminal needed)
+1. Install Python from https://www.python.org/downloads/ . In the installer, tick **"Add python.exe to PATH"** and click *Install Now*.
+2. On this GitHub page click the green **Code** button → **Download ZIP**, then right-click the ZIP → **Extract All**.
+3. Double-click **`imagesearcher.py`** in the extracted folder.
+   - The first start installs PySide6 by itself (a black window shows progress for a minute or two). Later starts open right away.
+   - If Windows asks which app should open the file, choose **Python**.
+   - Leave the black window open while you use the app; closing it closes the app.
+4. Videos open in your web browser unless you have [mpv](https://mpv.io) installed.
+
+Settings and favorites are saved in `C:\Users\<you>\.config\imagesearcher\`, and downloads go to `Pictures\imagesearcher`.
+
+To update, download the ZIP again and replace the folder (your settings are kept).
+
 ## Credentials
 - **Rule34 / Gelbooru** (required): My Account → Options → *API Access Credentials* → copy `api_key` and `user_id` into ⚙.
 - **Danbooru** (optional, needed for >2 tags): My Account → API Key.
