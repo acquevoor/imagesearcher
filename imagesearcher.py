@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""imagesearcher: Danbooru / Gelbooru / Rule34.xxx / Pixiv browser and downloader."""
+"""imagesearcher: Danbooru-first tag / artist browser and downloader, with Gelbooru, Rule34.xxx and Pixiv folded in."""
+import functools
 import hashlib
+import html
 import importlib.util
+import io
 import itertools
 import json
 import logging
@@ -16,8 +19,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from xml.etree import ElementTree
 
 try:
     import PySide6.QtWidgets  # noqa: F401
@@ -35,15 +40,19 @@ except ImportError as e:  # first double-click on a plain Python install (e.g. W
     sys.exit(subprocess.call([sys.executable] + sys.argv))
 
 from PySide6.QtCore import QModelIndex, QObject, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QIcon, QImage, QKeySequence, QPixmap, QShortcut, QStandardItem, QStandardItemModel
+from PySide6.QtGui import (
+    QColor, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap, QShortcut, QStandardItem, QStandardItemModel,
+)
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QCompleter, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
-    QPlainTextEdit, QPushButton, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QTabBar, QTabWidget, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 SITES = {"danbooru": "Danbooru", "gelbooru": "Gelbooru", "rule34": "Rule34", "pixiv": "Pixiv"}
 SHORT = {"danbooru": "DB", "gelbooru": "GB", "rule34": "R34", "pixiv": "PX"}
+BOORUS = ("danbooru", "gelbooru", "rule34")
 VIDEO_EXT = {".mp4", ".webm", ".zip"}  # .zip = Danbooru ugoira, its sample is a .webm
 THUMB = 180
 UA = "imagesearcher/1.0"
@@ -51,6 +60,18 @@ PIXIV_UA = "PixivAndroidApp/5.0.234 (Android 11; Pixel 5)"
 PIXIV_REFERER = "https://app-api.pixiv.net/"
 PIXIV_CLIENT = ("MOBrBDS8blbauoSck0ZfDbtuzpyT", "lsACyCD94FhDUtGTXi3QzcFE2uU1hqtDaKeqrdwj")
 PIXIV_HASH = "28c1fdd170a5204386cb1313c7077b34f83e4aaf4aa829ce78c231e05b0bae2c"
+
+CATS = {0: "general", 1: "artist", 3: "copyright", 4: "character", 5: "meta"}  # Danbooru and Gelbooru agree
+CAT_COLOR = {"artist": "#e0474c", "copyright": "#b05ce6", "character": "#2fb344", "general": "#3b8eea", "meta": "#e8a33d"}
+CJK = re.compile(r"[぀-ヿ㐀-鿿가-힯]")  # kana / kanji / hangul = a Pixiv-style tag
+KANA = re.compile("[぀-ヿ]")  # hiragana / katakana: a Japanese name, what Pixiv tags use
+META = re.compile(r"-?(rating|order|sort|score|favcount|id|pool|ordpool|user|fav|status|width|height|md5|source|pixiv"
+                  r"|date|age|limit|is|has|parent|child|ratio|filetype|mpixels|tagcount):")
+PX_SRC = re.compile(r"pximg\.net/.*/(\d+)_(?:p\d|ugoira)|pixiv\.net/(?:\w\w/)?artworks/(\d+)|illust_id=(\d+)")
+PX_USER = re.compile(r"pixiv\.net/(?:\w\w/)?(?:users/|member\.php\?id=)(\d+)")
+SORT = {"Newest": {}, "Score": {"danbooru": "order:score", "gelbooru": "sort:score:desc", "rule34": "sort:score:desc", "pixiv": "order:score"},
+        "Random": {"danbooru": "order:random", "gelbooru": "sort:random", "rule34": "sort:random"}}
+PX_RATE = {"g": "gs", "e": "qe"}  # Pixiv only knows all-ages vs R-18
 
 CONF_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "imagesearcher" / "config.json"
 DEFAULTS = {
@@ -60,7 +81,10 @@ DEFAULTS = {
     "pixiv": {"refresh_token": ""},
     "blacklist": [], "favorites": [], "saved": [], "sites": ["danbooru"], "limit": 40,
     "download_dir": str(Path.home() / "Pictures" / "imagesearcher"), "history": False,
+    "follows": {},  # "tag:x" / "artist:x" -> {site: last seen id, "uid": Pixiv user id}
+    "pixiv_map": {},  # booru tag -> Pixiv tag from its Danbooru wiki ("" = none known)
 }
+CONF_LOCK = threading.RLock()  # workers add to pixiv_map / refresh the Pixiv token while the UI saves
 
 
 def load_conf():
@@ -75,12 +99,13 @@ def load_conf():
 
 def save_conf(conf):
     # 0600: holds API keys and the Pixiv refresh token
-    CONF_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = CONF_PATH.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(conf, f, indent=1)
-    os.replace(tmp, CONF_PATH)
+    with CONF_LOCK:
+        CONF_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CONF_PATH.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(conf, f, indent=1)
+        os.replace(tmp, CONF_PATH)
 
 
 # ---------- logging ----------
@@ -135,7 +160,13 @@ def get_json(url, site, **kw):
     try:
         body = http(url, **kw).strip()
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"{SITES[site]}: HTTP {e.code}{hint if e.code in (401, 403) else ''}") from None
+        try:
+            msg = " " + json.loads(e.read())["message"]  # Danbooru explains its 4xx, e.g. the 2-tag limit
+        except Exception:
+            msg = ""
+        if "2 tags" in msg:
+            hint = " (a Danbooru login + API key in Settings lifts this)"
+        raise RuntimeError(f"{SITES[site]}: HTTP {e.code}{msg}{hint if e.code in (401, 403, 422) else ''}") from None
     try:
         data = json.loads(body) if body else None
     except ValueError:
@@ -149,16 +180,28 @@ def qs(**params):
     return urllib.parse.urlencode({k: v for k, v in params.items() if v not in ("", None)})
 
 
-def make_post(site, pid, thumb, files, samples, tags, rating, page, w=0, h=0):
+def dan(path, conf=None, **params):
+    """GET danbooru.donmai.us/<path>.json; logged in when conf has a Danbooru key."""
+    c = conf["danbooru"] if conf else {}
+    return get_json(f"https://danbooru.donmai.us/{path}.json?" + qs(**params, login=c.get("login"), api_key=c.get("api_key")), "danbooru")
+
+
+def make_post(site, pid, thumb, files, samples, tags, rating, page, w=0, h=0, **extra):
     ext = Path(urllib.parse.urlparse(files[0]).path).suffix.lower()
     return {"site": site, "id": str(pid), "thumb": thumb or (samples or files)[0], "files": files,
             "samples": samples or files, "tags": tags, "rating": rating, "page": page, "w": w, "h": h,
-            "video": ext in VIDEO_EXT}
+            "video": ext in VIDEO_EXT, "pixiv_id": None, "md5": "", **extra}
 
 
 def norm_rating(r):
     r = str(r or "").lower()
     return "g" if r in ("safe", "general") else r[:1]
+
+
+def px_id(source):
+    """Pixiv illust id from a booru 'source' URL, else None."""
+    m = PX_SRC.search(source or "")
+    return next((g for g in m.groups() if g), None) if m else None
 
 
 # Danbooru
@@ -172,7 +215,9 @@ def parse_danbooru(items):
             continue
         out.append(make_post("danbooru", p["id"], variants.get("360x360") or p.get("preview_file_url"), [f],
                              [p.get("large_file_url") or f], p.get("tag_string", "").split(), p.get("rating", ""),
-                             f"https://danbooru.donmai.us/posts/{p['id']}", p.get("image_width", 0), p.get("image_height", 0)))
+                             f"https://danbooru.donmai.us/posts/{p['id']}", p.get("image_width", 0), p.get("image_height", 0),
+                             pixiv_id=str(p["pixiv_id"]) if p.get("pixiv_id") else px_id(p.get("source")), md5=p.get("md5", ""),
+                             cats={c: p.get(f"tag_string_{c}", "").split() for c in CAT_COLOR}))
     return out
 
 
@@ -204,7 +249,8 @@ def parse_gel(site, data):
             continue
         sample = p.get("sample_url") if p.get("sample") and p.get("sample_url") else p["file_url"]
         out.append(make_post(site, p["id"], p.get("preview_url"), [p["file_url"]], [sample], p.get("tags", "").split(),
-                             norm_rating(p.get("rating")), GEL[site][1] + str(p["id"]), p.get("width", 0), p.get("height", 0)))
+                             norm_rating(p.get("rating")), GEL[site][1] + str(p["id"]), p.get("width", 0), p.get("height", 0),
+                             pixiv_id=px_id(p.get("source")), md5=p.get("md5") or p.get("hash") or ""))
     return out
 
 
@@ -224,6 +270,17 @@ def complete_gel(site, conf, word):
                                                     api_key=c["api_key"], user_id=c["user_id"])
     res = get_json(url, site) or []
     return [(t["value"], t.get("label") or t["value"]) for t in res if t.get("value")]
+
+
+def parse_gel_tags(site, body):
+    """Gelbooru answers the tag dapi in JSON, Rule34 only in XML."""
+    if body.startswith(b"<"):
+        return [dict(t.attrib) for t in ElementTree.fromstring(body).iter("tag")]
+    try:
+        data = json.loads(body) if body else []
+    except ValueError:
+        raise RuntimeError(f"{SITES[site]}: {body[:150].decode(errors='replace')} (set user id + API key in Settings)") from None
+    return data.get("tag", []) if isinstance(data, dict) else data
 
 
 # Pixiv (app API; refresh token from Settings)
@@ -252,6 +309,10 @@ def pixiv_headers(conf):
                 "App-OS": "android", "App-OS-Version": "11", "Accept-Language": "en-us"}
 
 
+def pixiv_api(conf, path, **params):
+    return get_json(f"https://app-api.pixiv.net/{path}?" + qs(**params), "pixiv", headers=pixiv_headers(conf))
+
+
 def parse_pixiv(data):
     out = []
     for i in (data or {}).get("illusts", []):
@@ -263,37 +324,108 @@ def parse_pixiv(data):
         else:
             files = [i["meta_single_page"]["original_image_url"]]
             samples = [i["image_urls"]["large"]]
-        # ponytail: ugoira = first frame only; fetch /v1/ugoira/metadata zip if animation matters
         tags = list(dict.fromkeys(n for t in i.get("tags", []) for n in (t["name"], t.get("translated_name")) if n))
         out.append(make_post("pixiv", i["id"], i["image_urls"]["square_medium"], files, samples, tags,
                              "e" if i.get("x_restrict") else "g", f"https://www.pixiv.net/artworks/{i['id']}",
-                             i.get("width", 0), i.get("height", 0)))
+                             i.get("width", 0), i.get("height", 0), pixiv_id=str(i["id"]), ugoira=i.get("type") == "ugoira",
+                             user=str((i.get("user") or {}).get("id", ""))))
     return out
 
 
+def pixiv_names(conf, tags, lookup=True):
+    """booru tags -> {tag: Pixiv tag}: the first kana/kanji name in the tag's Danbooru wiki, cached in conf.
+    Unknown tags fall back to the tag itself, underscores as spaces and the _(qualifier) dropped."""
+    m = conf["pixiv_map"]
+    todo = [t for t in dict.fromkeys(tags) if t not in m and not CJK.search(t)]
+    if todo and lookup:
+        try:
+            found = {w["title"]: next((n for n in sorted(w["other_names"], key=lambda n: not KANA.search(n)) if CJK.search(n)), "")
+                     for w in dan("wiki_pages", **{"search[title_comma]": ",".join(todo), "only": "title,other_names", "limit": 100}) or []}
+            with CONF_LOCK:
+                m.update({t: found.get(t, "") for t in todo})  # "" = no Pixiv name, don't ask again
+        except (RuntimeError, OSError):
+            pass  # Danbooru down: fall back for now, try again next time
+    return {t: t if CJK.search(t) else m.get(t) or re.sub(r"_\([^)]*\)$", "", t).replace("_", " ") for t in tags}
+
+
+def pixiv_query(conf, q, lookup=True):
+    """booru query -> (Pixiv search words, all-ages only, popular sort). Exclusions and metatags have no Pixiv form."""
+    tags, sfw, popular = [], False, False
+    for t in q.split():
+        if t.startswith("rating:"):
+            sfw = all(r[:1] in "gs" for r in t[7:].split(","))
+        elif t in ("-rating:e", "-rating:explicit"):
+            sfw = True
+        elif t.startswith(("order:score", "order:favcount", "sort:score")):
+            popular = True
+        elif not t.startswith("-") and not META.match(t):
+            tags.append(t)
+    words = list(pixiv_names(conf, tags, lookup).values())
+    # ponytail: generic booru tags (1girl, solo) wreck a Pixiv search, so once any tag has a real Pixiv name use only those
+    cjk = [w for w in words if CJK.search(w)]
+    return " ".join(cjk or words), sfw, popular
+
+
 def search_pixiv(conf, tags, page):
-    url = "https://app-api.pixiv.net/v1/search/illust?" + qs(
-        word=tags, search_target="partial_match_for_tags", sort="date_desc", filter="for_android", offset=(page - 1) * 30)
-    return parse_pixiv(get_json(url, "pixiv", headers=pixiv_headers(conf)))
+    word, sfw, popular = pixiv_query(conf, tags)
+    if not word:
+        raise RuntimeError("Pixiv: nothing to search for (only metatags)")
+    if popular and page > 1:  # popular-preview is a single page: Pixiv's free popularity sort
+        return []
+    posts = parse_pixiv(pixiv_api(conf, "v1/search/" + ("popular-preview/illust" if popular else "illust"), word=word,
+                                  search_target="partial_match_for_tags", sort="date_desc", filter="for_android",
+                                  offset=None if popular else (page - 1) * 30))
+    return [p for p in posts if p["rating"] == "g"] if sfw else posts
+
+
+def pixiv_user(conf, arg, page):
+    """A Pixiv user's works; arg "uid>last" keeps only works newer than last (followed artists)."""
+    uid, _, last = str(arg).partition(">")
+    # ponytail: type=illust only, manga-type posts would need a second type=manga feed
+    posts = parse_pixiv(pixiv_api(conf, "v1/user/illusts", user_id=uid, type="illust", filter="for_android", offset=(page - 1) * 30))
+    return [p for p in posts if int(p["id"]) > int(last or 0)]
+
+
+def pixiv_related(conf, iid, page):
+    if page > 1:  # ponytail: first page only, follow next_url if more is ever wanted
+        return []
+    return parse_pixiv(pixiv_api(conf, "v2/illust/related", illust_id=iid, filter="for_android"))
 
 
 def complete_pixiv(conf, word):
-    url = "https://app-api.pixiv.net/v2/search/autocomplete?" + qs(word=word, merge_plain_keyword_results="true")
-    tags = (get_json(url, "pixiv", headers=pixiv_headers(conf)) or {}).get("tags", [])
+    tags = (pixiv_api(conf, "v2/search/autocomplete", word=word, merge_plain_keyword_results="true") or {}).get("tags", [])
     return [(t["name"], f"{t['name']}  ({t['translated_name']})" if t.get("translated_name") else t["name"]) for t in tags]
+
+
+def ugoira(conf, iid):
+    """-> (frames zip url, [(frame file, delay ms)])"""
+    m = pixiv_api(conf, "v1/ugoira/metadata", illust_id=iid)["ugoira_metadata"]
+    return m["zip_urls"]["medium"], [(f["file"], f["delay"]) for f in m["frames"]]
+
+
+def ugoira_frames(conf, iid):
+    url, frames = ugoira(conf, iid)
+    with zipfile.ZipFile(io.BytesIO(http(url))) as z:
+        return [(QImage.fromData(z.read(f)), d) for f, d in frames]
 
 
 SEARCH = {"danbooru": search_danbooru, "pixiv": search_pixiv,
           "gelbooru": lambda *a: search_gel("gelbooru", *a), "rule34": lambda *a: search_gel("rule34", *a)}
+FEEDS = {"user": pixiv_user, "related": pixiv_related}  # non-tag Pixiv sources
 COMPLETE = {"danbooru": complete_danbooru, "pixiv": complete_pixiv,
             "gelbooru": lambda *a: complete_gel("gelbooru", *a), "rule34": lambda *a: complete_gel("rule34", *a)}
 
 
-def fetch_all(sites, conf, tags, page):
-    """Query sites in parallel -> ({site: posts}, {site: error})."""
+def fetch(conf, src, page):
+    site, kind, arg = src
+    return (SEARCH[site] if kind == "tags" else FEEDS[kind])(conf, arg, page)
+
+
+def fetch_all(srcs, conf, page):
+    """Query sources (site, kind, arg) in parallel -> ({src: posts}, {src: error})."""
     lists, errs = {}, {}
-    with ThreadPoolExecutor(len(sites) or 1) as ex:
-        futs = {s: ex.submit(SEARCH[s], conf, tags, page) for s in sites}
+    with ThreadPoolExecutor(len(srcs) or 1) as ex:
+        futs = {s: ex.submit(fetch, conf, s, page) for s in srcs}
         for s, f in futs.items():
             try:
                 lists[s] = f.result()
@@ -310,6 +442,130 @@ def allowed(post, blacklist):
     return not ({t.lower() for t in post["tags"]} | {"rating:" + post["rating"]}) & blacklist
 
 
+def rating_ok(post, ratings):
+    """Client-side rating filter (Danbooru's anonymous 2-tag limit counts rating: tokens). Unknown ratings pass."""
+    r = post["rating"]
+    return not r or bool(set(PX_RATE.get(r, r) if post["site"] == "pixiv" else r) & ratings)
+
+
+def fold(seen, p):
+    """Cross-site dedupe within one feed. seen maps "md5:…" / "px:…" -> slot, a list whose [0] is the shown post.
+    -> (slot, new): new = add a tile, else slot[0] was updated in place; None = drop p.
+    Booru copies win (better tags); the Pixiv copy rides along as post["alt"]."""
+    md5, px = p.get("md5"), p.get("pixiv_id")
+    if md5 and "md5:" + md5 in seen:
+        return None
+    twin = seen.get("px:" + px) if px else None
+    if twin and p["site"] == "pixiv":
+        if twin[0]["site"] == "pixiv" or twin[0].get("alt"):
+            return None
+        twin[0] = {**twin[0], "alt": p}
+        return twin, False
+    if twin and twin[0]["site"] == "pixiv":  # booru copy of a Pixiv tile: take its place
+        twin[0] = {**p, "alt": twin[0]}
+        slot, new = twin, False
+    else:  # new, or one more booru post of a multi-page Pixiv work
+        slot, new = [p], True
+    if md5:
+        seen["md5:" + md5] = slot
+    if px:
+        seen.setdefault("px:" + px, slot)
+    return slot, new
+
+
+def follow_srcs(follows):
+    """{key: {site: last id, "uid": Pixiv user}} -> {source: (key, site)} for posts newer than last seen."""
+    out = {}
+    for key, f in follows.items():
+        tag = key.split(":", 1)[1]
+        for site, last in f.items():
+            if site == "pixiv" and f.get("uid"):
+                out["pixiv", "user", f"{f['uid']}>{last}"] = key, site
+            elif site in BOORUS:
+                out[site, "tags", f"{tag} id:>{last}"] = key, site
+    return out
+
+
+def list_tags(conf, site, mode, order, word, page):
+    """Tag (or Danbooru pool) listing -> [{name, count, cat, …}]; mode = a category name, "All" or "Pools"."""
+    pat = word if "*" in word else f"*{word}*" if word else ""
+    if mode == "Pools":
+        rows = dan("pools", conf, **{"search[name_matches]": pat, "search[is_deleted]": "false", "page": page, "limit": 40,
+                                     "search[order]": {"Count": "post_count", "Name": "name", "Newest": "created_at"}[order],
+                                     "only": "id,name,post_count,description"})
+        return [{"name": p["name"], "count": p["post_count"], "cat": "pool", "id": p["id"], "desc": p["description"]} for p in rows or []]
+    cat = {v: k for k, v in CATS.items()}.get(mode.lower())
+    if site == "danbooru":
+        rows = dan("tags", conf, **{"search[name_matches]": pat, "search[category]": cat, "search[hide_empty]": "true",
+                                    "search[order]": {"Count": "count", "Name": "name", "Newest": "date"}[order],
+                                    "page": page, "limit": 40, "only": "name,post_count,category"})
+        return [{"name": t["name"], "count": t["post_count"], "cat": CATS.get(t["category"], "general")} for t in rows or []]
+    c = conf[site]
+    url = GEL[site][0] + "?" + qs(page="dapi", s="tag", q="index", json=1, name_pattern=pat.replace("*", "%"), pid=page - 1, limit=40,
+                                  orderby={"Count": "count", "Name": "name", "Newest": "date"}[order], order="ASC" if order == "Name" else "DESC",
+                                  api_key=c["api_key"], user_id=c["user_id"])
+    try:
+        body = http(url).strip()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"{SITES[site]}: HTTP {e.code}") from None
+    # ponytail: Gelbooru can't filter by category server-side, so a filtered page may come back short or empty
+    return [{"name": t["name"], "count": int(t.get("count", 0)), "cat": CATS.get(int(t.get("type", 0)), "general")}
+            for t in parse_gel_tags(site, body) if cat is None or int(t.get("type", 0)) == cat]
+
+
+def dtext(s, n=600):
+    """Danbooru wiki DText -> plain excerpt."""
+    s = re.sub(r"\[\[(?:[^]|]*\|)?([^]]*)\]\]", r"\1", s or "")  # [[tag|label]] -> label
+    s = re.sub(r"\[/?\w+(?:=[^]]*)?\]|^h\d\.\s*", "", s, flags=re.M).strip()  # [b], [url=…], h4.
+    return s[:n] + ("…" if len(s) > n else "")
+
+
+@functools.lru_cache(256)  # ponytail: never expires; a wiki edit shows after restart
+def tag_info(tag):
+    """Danbooru wiki excerpt, other names (Pixiv tags) and related tags of one tag."""
+    try:
+        wiki = dan(f"wiki_pages/{urllib.parse.quote(tag, safe='')}") or {}
+    except RuntimeError:
+        wiki = {}  # no wiki page
+    rel = dan("related_tag", query=tag, limit=25) or {}
+    return {"wiki": dtext(wiki.get("body")), "names": [n for n in wiki.get("other_names", []) if CJK.search(n)][:8],
+            "related": [(t["tag"]["name"], CATS.get(t["tag"]["category"], "general")) for t in rel.get("related_tags", [])
+                        if t["tag"]["name"] != tag]}
+
+
+def link(kind, text, cat="", label=None):
+    """<a> whose href "kind:cat:text" is handled by Main.link (or a tab's own link())."""
+    style = f" style='color:{CAT_COLOR[cat]}'" if cat in CAT_COLOR else ""
+    return f"<a href='{kind}:{cat}:{urllib.parse.quote(text)}'{style}>{html.escape(label or text)}</a>"
+
+
+def tag_html(info):
+    out = ""
+    if info["names"]:
+        out += "<p><b>Pixiv:</b> " + " · ".join(link("px", n) for n in info["names"]) + "</p>"
+    if info["wiki"]:
+        out += f"<p>{html.escape(info['wiki'])}</p>"
+    if info["related"]:
+        out += "<p><b>Related:</b> " + " ".join(link("tag", t, c) for t, c in info["related"]) + "</p>"
+    return out
+
+
+def artist_info(conf, tag):
+    """Danbooru artist entry -> Pixiv user id + profile, and the Pixiv ids of works already on Danbooru."""
+    a = (dan("artists", conf, **{"search[name]": tag, "only": "name,other_names,urls"}) or [{}])[0]
+    urls = [u["url"] for u in a.get("urls", [])]
+    uid = next((m[1] for u in urls if (m := PX_USER.search(u))), None)
+    # ponytail: newest 200 posts only, page further if big artists show false "missing" marks
+    ids = {str(p["pixiv_id"]) for p in dan("posts", conf, tags=tag, only="pixiv_id", limit=200) or [] if p.get("pixiv_id")}
+    user = None
+    if uid and conf["pixiv"]["refresh_token"]:
+        try:
+            user = pixiv_api(conf, "v1/user/detail", user_id=uid, filter="for_android")
+        except (RuntimeError, OSError):
+            pass
+    return {"names": a.get("other_names", []), "urls": urls, "uid": uid, "user": user, "ids": ids}
+
+
 def dest(root, post, i, query):
     folder = re.sub(r"[^\w\-+.() ]", "_", query).strip()[:100] or "_all"
     name = Path(urllib.parse.urlparse(post["files"][i]).path)
@@ -317,8 +573,10 @@ def dest(root, post, i, query):
     return Path(root) / post["site"] / folder / f"{post['site']}_{post['id']}{page}{name.suffix}"
 
 
-def download_post(post, root, query, cancel=None):
+def download_post(post, root, query, cancel=None, conf=None):
     """-> (new, skipped)"""
+    if post.get("ugoira") and conf:
+        return download_ugoira(conf, post, root, query)
     new = skip = 0
     for i, url in enumerate(post["files"]):
         if cancel and cancel.is_set():
@@ -334,6 +592,25 @@ def download_post(post, root, query, cancel=None):
         tmp.rename(d)
         new += 1
     return new, skip
+
+
+def download_ugoira(conf, post, root, query):
+    """Pixiv animation: the frames zip (full size when Pixiv has it) + a .json of frame delays.
+    ponytail: no gif/webm conversion, that needs ffmpeg"""
+    d = dest(root, post, 0, query).with_suffix(".zip")
+    if d.exists():
+        return 0, 1
+    url, frames = ugoira(conf, post["id"])
+    try:
+        data = http(url.replace("_ugoira600x600.zip", "_ugoira1920x1080.zip"), timeout=120)
+    except urllib.error.HTTPError:
+        data = http(url, timeout=120)
+    d.parent.mkdir(parents=True, exist_ok=True)
+    d.with_suffix(".json").write_text(json.dumps([{"file": f, "delay": ms} for f, ms in frames]))
+    tmp = d.with_name(d.name + ".part")
+    tmp.write_bytes(data)
+    tmp.rename(d)
+    return 1, 0
 
 
 # ---------- Qt plumbing ----------
@@ -364,13 +641,19 @@ def run(fn, cb, pool="net"):
     POOLS[pool].submit(job)
 
 
+def rich_label():
+    lab = QLabel(wordWrap=True, textFormat=Qt.RichText, textInteractionFlags=Qt.TextBrowserInteraction, alignment=Qt.AlignTop)
+    lab.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+    return lab
+
+
 THUMBS = {}  # ponytail: unbounded in-memory cache, fine for a browsing session; LRU if RAM ever matters
 
 
 class Grid(QListWidget):
     def __init__(self, on_open):
         super().__init__()
-        self.gen = 0
+        self.gen, self.feed = 0, None
         self.setViewMode(QListWidget.IconMode)
         self.setIconSize(QSize(THUMB, THUMB))
         self.setGridSize(QSize(THUMB + 12, THUMB + 28))
@@ -386,13 +669,22 @@ class Grid(QListWidget):
         self.clear()
 
     def add(self, posts):
+        items = []
         for p in posts:
-            pages = f" [{len(p['files'])}]" if len(p["files"]) > 1 else ""
-            it = QListWidgetItem(QIcon(self.blank), f"{SHORT[p['site']]} {p['id']}{pages}{' ▶' if p['video'] else ''}")
-            it.setData(Qt.UserRole, p)
-            it.setToolTip(" ".join(p["tags"][:40]))
+            it = QListWidgetItem(QIcon(self.blank), "")
             self.addItem(it)
-            self.load_thumb(p["thumb"], it)
+            self.set_post(it, p)
+            items.append(it)
+        return items
+
+    def set_post(self, it, p):
+        pages = f" [{len(p['files'])}]" if len(p["files"]) > 1 else ""
+        alt = "+" + SHORT[p["alt"]["site"]] if p.get("alt") else ""
+        anim = " ▶" if p["video"] or p.get("ugoira") else ""
+        it.setText(f"{SHORT[p['site']]}{alt} {p['id']}{pages}{anim}")
+        it.setData(Qt.UserRole, p)
+        it.setToolTip(" ".join(p["tags"][:40]))
+        self.load_thumb(p["thumb"], it)
 
     def load_thumb(self, url, item):
         if url in THUMBS:
@@ -416,17 +708,434 @@ class Grid(QListWidget):
         run(fetch, done, "thumb")
 
 
+class Feed(QWidget):
+    """A paged, cross-site-deduped grid over sources [(site, kind, arg)]: search results, tag tabs, artist panes, New."""
+
+    def __init__(self, main, label=""):
+        super().__init__()
+        self.main, self.label, self.srcs, self.note = main, label, [], ""
+        self.keep = self.mark = None  # optional post filter / tile decorator
+        self.gen = self.page = 0
+        self.loading, self.active, self.errs, self.seen = False, [], {}, {}
+        self.grid = Grid(main.viewer.open)
+        self.grid.feed = self
+        self.status = QLabel(wordWrap=True)
+        self.lay = QVBoxLayout(self)
+        self.lay.setContentsMargins(0, 0, 0, 0)
+        self.lay.addWidget(self.grid, 1)
+        self.lay.addWidget(self.status)
+        sb = self.grid.verticalScrollBar()
+        sb.valueChanged.connect(lambda v: v >= sb.maximum() - THUMB and self.more())
+
+    def start(self, srcs, label=None):
+        self.srcs, self.label = list(srcs), self.label if label is None else label
+        self.gen += 1
+        self.page, self.loading, self.errs, self.seen, self.active = 0, False, {}, {}, list(self.srcs)
+        if self.main.viewer.grid is self.grid:
+            self.main.viewer.hide()  # its post is about to be cleared
+        self.grid.restart()
+        self.status.setText("Nothing to search." + self.note if not self.srcs else "")
+        self.more()
+
+    def stop(self):
+        self.gen += 1
+        self.active = []
+
+    def more(self):
+        if self.loading or not self.active:
+            return
+        self.loading = True
+        self.page += 1
+        gen, srcs, page, conf = self.gen, list(self.active), self.page, self.main.conf
+        self.status.setText(f"Loading page {page}…")
+        run(lambda: fetch_all(srcs, conf, page), lambda r, e: self.got(gen, r, e))
+
+    def got(self, gen, res, err):
+        if gen != self.gen:
+            return
+        self.loading = False
+        if err:
+            log.error("'%s' failed: %s", self.label, err)
+            self.status.setText(str(err))
+            return
+        lists, errs = res
+        for s, e in errs.items():
+            if s not in self.errs:
+                log.warning(e)
+        self.errs.update(errs)  # sticky: a site that failed on page 1 stays explained
+        self.active = [s for s in self.active if lists[s]]  # drop exhausted/broken sources from paging
+        bl = set(self.main.conf["blacklist"])
+        for p in interleave(lists.values()):
+            if allowed(p, bl) and (not self.keep or self.keep(p)):
+                self.place(p)
+        counts = "  ".join(f"{SHORT[s[0]]}:{len(l)}" for s, l in lists.items())
+        via = "".join(f'  PX via "{pixiv_query(self.main.conf, s[2], False)[0]}"' for s in self.srcs if s[:2] == ("pixiv", "tags"))
+        msg = f"'{self.label}' page {self.page}: {self.grid.count()} posts ({counts}){via}{self.note}"
+        if self.errs:
+            msg += "  |  " + "  ".join(self.errs.values())
+        if not self.active:
+            msg += "  — end of results"
+        self.status.setText(msg)
+        log.info("'%s' page %d: %s", self.label, self.page, counts)
+        self.loaded(lists)
+        if self.active and self.grid.verticalScrollBar().maximum() == 0:
+            QTimer.singleShot(0, self.more)  # page didn't fill the window
+
+    def place(self, p):
+        r = fold(self.seen, p)
+        if not r:
+            return
+        slot, new = r
+        if new:
+            slot.append(self.grid.add([slot[0]])[0])
+            if self.mark:
+                self.mark(slot[1], slot[0])
+        else:
+            self.grid.set_post(slot[1], slot[0])
+
+    def loaded(self, lists):
+        pass
+
+
+class TagView(Feed):
+    """One tag's images: the boorus plus Pixiv through the tag bridge, with wiki header and related tags."""
+
+    def __init__(self, main, tag, pixiv=None, sites=None, title=None):
+        super().__init__(main, title or tag or pixiv)
+        self.base, self.tag, self.pixiv, self.sites, self.info = tag, tag, pixiv, sites, None
+        self.head = rich_label()
+        self.head.linkActivated.connect(self.link)
+        self.src, self.sort = QComboBox(), QComboBox()
+        self.src.addItems(["Both", "Boorus", "Pixiv"])
+        self.sort.addItems(list(SORT))
+        self.rate = {r: QCheckBox(r, checked=True, toolTip="rating filter") for r in "gsqe"}
+        self.follow = QPushButton(clicked=self.toggle_follow, enabled=bool(tag) and ":" not in tag)
+        row = QHBoxLayout()
+        for w in (self.src, self.sort, QLabel("rating:"), *self.rate.values()):
+            row.addWidget(w)
+        row.addStretch()
+        for w in (self.follow, QPushButton("⬇ Bulk", clicked=lambda: main.bulk(self)),
+                  QPushButton("Open on Danbooru", clicked=lambda: webbrowser.open("https://danbooru.donmai.us/posts?" + qs(tags=self.tag)))):
+            row.addWidget(w)
+        scroll = QScrollArea(widgetResizable=True, maximumHeight=220)
+        scroll.setWidget(self.head)
+        self.lay.insertWidget(0, scroll)
+        self.lay.insertLayout(1, row)
+        for w in (self.src, self.sort):
+            w.currentIndexChanged.connect(self.reload)
+        for c in self.rate.values():
+            c.toggled.connect(self.reload)
+        self.render()
+        self.reload()
+        if tag and ":" not in tag:  # pools / metatags have no wiki
+            run(lambda: (tag_info(tag), dan("counts/posts", tags=tag)["counts"]["posts"]), self.got_head)
+
+    def reload(self):
+        conf, mode, sort = self.main.conf, self.src.currentText(), SORT[self.sort.currentText()]
+        boorus = self.sites or [s for s in BOORUS if self.main.cb[s].isChecked()] or ["danbooru"]
+        srcs = [(s, "tags", f"{self.tag} {sort.get(s, '')}".strip()) for s in boorus] if mode != "Pixiv" and self.tag else []
+        pq = f"{self.pixiv}{self.tag[len(self.base):]}" if self.pixiv else self.tag
+        pq = f"{pq} {sort.get('pixiv', '')}".strip()
+        has_token = bool(conf["pixiv"]["refresh_token"])
+        if mode != "Boorus" and has_token and pixiv_query(conf, pq, False)[0] and not self.sites:
+            srcs.append(("pixiv", "tags", pq))
+        self.note = "  (Pixiv: add a refresh token in ⚙)" if mode != "Boorus" and not has_token and not self.sites else ""
+        ratings = {r for r, c in self.rate.items() if c.isChecked()}
+        self.keep = None if len(ratings) == 4 else lambda p: rating_ok(p, ratings)
+        self.follow.setText("★ Following" if f"tag:{self.base}" in conf["follows"] else "☆ Follow")
+        self.start(srcs)
+
+    def got_head(self, res, err):
+        if not err:
+            self.info, self.count = res
+            self.render()
+
+    def render(self):
+        title = html.escape(self.label)
+        extra = self.tag[len(self.base):].strip()
+        out = f"<h3>{title}</h3>"
+        if extra:
+            out += f"<p>narrowed by <b>{html.escape(extra)}</b> · {link('reset', '', label='⟲ reset')}</p>"
+        if self.pixiv:
+            out += f"<p>Pixiv pinned to <b>{html.escape(self.pixiv)}</b></p>"
+        if self.info:
+            out += f"<p>{self.count:,} posts on Danbooru</p>" + tag_html(self.info)
+        self.head.setText(out)
+
+    def link(self, href):
+        kind, cat, text = href.split(":", 2)
+        text = urllib.parse.unquote(text)
+        ctrl = QApplication.keyboardModifiers() & Qt.ControlModifier
+        if kind == "reset":
+            self.tag = self.base
+        elif kind == "tag" and self.tag and not ctrl:  # narrow this tab; Ctrl+click opens the tag in its own tab
+            self.tag = f"{self.tag} {text}"
+        else:
+            return self.main.link(href, self.base)
+        self.render()
+        self.reload()
+
+    def toggle_follow(self):
+        on = self.main.toggle_follow(f"tag:{self.base}")
+        self.follow.setText("★ Following" if on else "☆ Follow")
+
+
+class NewFeed(Feed):
+    """Posts newer than the last one seen, for every followed tag and artist."""
+
+    def __init__(self, main):
+        super().__init__(main, "New")
+        self.keys, self.newest = {}, {}
+        self.head = rich_label()
+        self.head.linkActivated.connect(self.link)
+        row = QHBoxLayout()
+        row.addWidget(self.head, 1)
+        for w in (QPushButton("⟳ Refresh", clicked=self.reload), QPushButton("✓ Mark all seen", clicked=self.mark_seen)):
+            row.addWidget(w)
+        self.lay.insertLayout(0, row)
+        # ponytail: checks only while the app runs; no background service
+        QTimer(self, interval=15 * 60 * 1000, timeout=self.auto).start()
+        self.reload()
+
+    def reload(self):
+        f = self.main.conf["follows"]
+        self.keys, self.newest = follow_srcs(f), {}
+        self.head.setText("Following: " + "  ".join(f"{link('open', k, label=k.split(':', 1)[1])} {link('unf', k, label='×')}" for k in f)
+                          if f else "Follow tags or artists (☆ in their tabs) to collect their new posts here.")
+        self.start(list(self.keys))
+        self.main.set_new_count("")
+
+    def auto(self):
+        if not (self.main.viewer.isVisible() and self.main.viewer.grid is self.grid):
+            self.reload()
+
+    def loaded(self, lists):
+        for src, posts in lists.items():
+            if posts:
+                self.newest[src] = max(self.newest.get(src, 0), *(int(p["id"]) for p in posts))
+        n = self.grid.count()
+        self.main.set_new_count(f"{n}{'+' if self.active else ''}" if n else "")
+
+    def mark_seen(self):
+        f = self.main.conf["follows"]
+        for src, top in self.newest.items():
+            key, site = self.keys[src]
+            if key in f:
+                f[key][site] = max(f[key].get(site, 0), top)
+        save_conf(self.main.conf)
+        log.info("new: marked seen")
+        self.reload()
+
+    def link(self, href):
+        kind, _, key = href.split(":", 2)
+        key = urllib.parse.unquote(key)
+        if kind == "unf":
+            self.main.toggle_follow(key)
+        else:
+            what, name = key.split(":", 1)
+            self.main.open_artist(name) if what == "artist" else self.main.open_tag(name)
+
+
+class ArtistView(QWidget):
+    """A booru artist tag next to the artist's Pixiv works (the Pixiv account comes from Danbooru's artist URLs)."""
+
+    def __init__(self, main, tag):
+        super().__init__()
+        self.main, self.tag, self.uid, self.ids = main, tag, None, set()
+        self.head = rich_label()
+        self.head.linkActivated.connect(lambda h: webbrowser.open(h) if h.startswith("http") else main.link(h, tag))
+        self.head.setText(f"<h2 style='color:{CAT_COLOR['artist']}'>{html.escape(tag)}</h2><i>looking up artist…</i>")
+        self.booru, self.px = Feed(main, tag), Feed(main, f"{tag} (Pixiv)")
+        self.px.mark = self.mark
+        self.missing = QCheckBox("Pixiv: only works not on Danbooru")
+        self.missing.toggled.connect(self.refilter)
+        self.follow = QPushButton("★ Following" if f"artist:{tag}" in main.conf["follows"] else "☆ Follow", clicked=self.toggle_follow)
+        row = QHBoxLayout()
+        for w in (self.missing, self.follow, QPushButton("⬇ Bulk booru", clicked=lambda: main.bulk(self.booru)),
+                  QPushButton("⬇ Bulk Pixiv", clicked=lambda: main.bulk(self.px))):
+            row.addWidget(w)
+        row.insertStretch(1)
+        self.split = split = QSplitter()
+        split.addWidget(self.booru)
+        split.addWidget(self.px)
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.head)
+        lay.addLayout(row)
+        lay.addWidget(split, 1)
+        self.booru.start([(s, "tags", tag) for s in BOORUS if main.cb[s].isChecked()] or [("danbooru", "tags", tag)])
+        conf = main.conf
+        run(lambda: artist_info(conf, tag), self.got_info)
+
+    def got_info(self, a, err):
+        name = f"<h2 style='color:{CAT_COLOR['artist']}'>{html.escape(self.tag)}</h2>"
+        if err:
+            return self.head.setText(f"{name}<i>{html.escape(str(err))}</i>")
+        self.uid, self.ids = a["uid"], a["ids"]
+        out = name + ("<p>aka " + ", ".join(map(html.escape, a["names"])) + "</p>" if a["names"] else "")
+        if a["user"]:
+            u = a["user"]
+            out += (f"<p>Pixiv: <a href='https://www.pixiv.net/users/{self.uid}'>{html.escape(u['user']['name'])}</a>"
+                    f" · {u['profile'].get('total_illusts', 0)} illusts · {len(self.ids)} of the newest 200 Danbooru posts link to Pixiv</p>")
+        out += "<p>" + " · ".join(f"<a href='{html.escape(u)}'>{html.escape(urllib.parse.urlparse(u).netloc)}</a>" for u in a["urls"]) + "</p>"
+        self.head.setText(out)
+        if not self.uid or not self.main.conf["pixiv"]["refresh_token"]:
+            self.split.setSizes([3000, 1000])  # nothing to show on the Pixiv side, give the booru the room
+        if not self.uid:
+            self.px.status.setText("No Pixiv account on this artist's Danbooru entry.")
+        elif not self.main.conf["pixiv"]["refresh_token"]:
+            self.px.status.setText("Pixiv: paste a refresh token in Settings (see README).")
+        else:
+            self.px.start([("pixiv", "user", self.uid)])
+
+    def mark(self, it, p):
+        if p["pixiv_id"] in self.ids:
+            it.setText(it.text() + " ✓DB")
+            it.setForeground(QColor("gray"))
+
+    def refilter(self, on):
+        self.px.keep = (lambda p: p["pixiv_id"] not in self.ids) if on else None
+        if self.px.srcs:
+            self.px.start(self.px.srcs)
+
+    def toggle_follow(self):
+        on = self.main.toggle_follow(f"artist:{self.tag}", self.uid)
+        self.follow.setText("★ Following" if on else "☆ Follow")
+
+
+class TagsTab(QWidget):
+    """Browse Danbooru tags (or Gelbooru / R34 ones) and Danbooru pools; double-click opens a tag tab."""
+
+    def __init__(self, main):
+        super().__init__()
+        self.main, self.cur, self.page, self.gen, self.loading, self.done = main, None, 0, 0, False, False
+        self.q = QLineEdit(placeholderText="filter tags…   (* = wildcard; empty = most used)")
+        self.mode, self.order, self.site = QComboBox(), QComboBox(), QComboBox()
+        self.mode.addItems(["All", "General", "Artist", "Copyright", "Character", "Meta", "Pools"])
+        self.order.addItems(["Count", "Name", "Newest"])
+        for s in BOORUS:
+            self.site.addItem(SITES[s], s)
+        self.timer = QTimer(self, singleShot=True, interval=300, timeout=self.reload)
+        self.q.textEdited.connect(lambda: self.timer.start())
+        for w in (self.mode, self.order, self.site):
+            w.currentIndexChanged.connect(self.reload)
+        top = QHBoxLayout()
+        for w in (self.q, self.mode, self.order, self.site):
+            top.addWidget(w, int(w is self.q))
+
+        self.list = QTreeWidget(rootIsDecorated=False, uniformRowHeights=True)
+        self.list.setHeaderLabels(["Tag", "Posts", "Pixiv"])
+        self.list.setColumnWidth(0, 300)
+        self.list.currentItemChanged.connect(lambda it, _: self.detail(it))
+        self.list.itemActivated.connect(lambda it, _: self.open(it))
+        sb = self.list.verticalScrollBar()
+        sb.valueChanged.connect(lambda v: v >= sb.maximum() - 50 and self.more())
+
+        self.info = rich_label()
+        self.info.linkActivated.connect(lambda h: main.link(h, self.cur and self.cur["name"]))
+        scroll = QScrollArea(widgetResizable=True)
+        scroll.setWidget(self.info)
+        self.follow = QPushButton("☆ Follow", clicked=self.toggle_follow)
+        btns = QHBoxLayout()
+        for w in (QPushButton("Open", clicked=lambda: self.open()), self.follow,
+                  QPushButton("Blacklist", clicked=lambda: self.cur and main.blacklist_add(self.cur["name"])),
+                  QPushButton("Copy", clicked=lambda: self.cur and QApplication.clipboard().setText(self.cur["name"]))):
+            btns.addWidget(w)
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        rl.addWidget(scroll, 1)
+        rl.addLayout(btns)
+        split = QSplitter()
+        split.addWidget(self.list)
+        split.addWidget(right)
+        split.setSizes([600, 500])
+        lay = QVBoxLayout(self)
+        lay.addLayout(top)
+        lay.addWidget(split, 1)
+        self.reload()
+
+    def reload(self):
+        self.gen += 1
+        self.page, self.done, self.loading = 0, False, False
+        self.list.clear()
+        self.more()
+
+    def more(self):
+        if self.loading or self.done:
+            return
+        self.loading = True
+        self.page += 1
+        gen, conf = self.gen, self.main.conf
+        args = (self.site.currentData(), self.mode.currentText(), self.order.currentText(), self.q.text().strip(), self.page)
+        run(lambda: list_tags(conf, *args), lambda r, e: self.got(gen, r, e))
+
+    def got(self, gen, rows, err):
+        if gen != self.gen:
+            return
+        self.loading = False
+        if err:
+            self.done = True
+            return self.info.setText(f"<i>{html.escape(str(err))}</i>")
+        self.done = not rows
+        items = []
+        for r in rows:
+            it = QTreeWidgetItem([r["name"], f"{r['count']:,}", ""])
+            it.setData(0, Qt.UserRole, r)
+            if r["cat"] in CAT_COLOR:
+                it.setForeground(0, QColor(CAT_COLOR[r["cat"]]))
+            it.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+            items.append(it)
+        self.list.addTopLevelItems(items)
+        names, conf = [r["name"] for r in rows if r["cat"] != "pool"], self.main.conf
+        if names:  # fill the Pixiv column from the wikis, one batched request per page
+            run(lambda: pixiv_names(conf, names),
+                lambda m, e: gen == self.gen and [it.setText(2, conf["pixiv_map"].get(it.text(0), "")) for it in items])
+        if not self.done and self.list.verticalScrollBar().maximum() == 0:
+            QTimer.singleShot(0, self.more)
+
+    def detail(self, it):
+        r = self.cur = it and it.data(0, Qt.UserRole)
+        if not r:
+            return
+        color = CAT_COLOR.get(r["cat"], "")
+        head = f"<h2 style='color:{color}'>{html.escape(r['name'])}</h2>{r['count']:,} posts · {r['cat']}"
+        self.follow.setEnabled(r["cat"] != "pool")
+        self.follow.setText("★ Following" if self.key(r) in self.main.conf["follows"] else "☆ Follow")
+        if r["cat"] == "pool":
+            return self.info.setText(f"{head}<p>{html.escape(dtext(r['desc']))}</p>")
+        self.info.setText(head + "<p><i>loading wiki…</i></p>")
+        name = r["name"]
+        run(lambda: tag_info(name), lambda res, e: self.cur is r and self.info.setText(
+            head + (f"<p><i>{html.escape(str(e))}</i></p>" if e else tag_html(res))))
+
+    def open(self, it=None):
+        r = it.data(0, Qt.UserRole) if it else self.cur
+        if r and r["cat"] == "pool":
+            self.main.open_pool(r["id"], r["name"])
+        elif r:
+            self.main.open_tag(r["name"], r["cat"])
+
+    @staticmethod
+    def key(r):
+        return ("artist:" if r["cat"] == "artist" else "tag:") + r["name"]
+
+    def toggle_follow(self):
+        if self.cur and self.cur["cat"] != "pool":
+            on = self.main.toggle_follow(self.key(self.cur))
+            self.follow.setText("★ Following" if on else "☆ Follow")
+
+
 class Viewer(QDialog):
     def __init__(self, main):
         super().__init__(main)
-        self.main, self.grid, self.row, self.pg, self.pix = main, None, 0, 0, None
+        self.main, self.grid, self.row, self.pg, self.pix, self.frames, self.fi = main, None, 0, 0, None, [], 0
         self.resize(1300, 900)
         self.img = QLabel(alignment=Qt.AlignCenter)
         self.img.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.info = QLabel(wordWrap=True, textInteractionFlags=Qt.TextSelectableByMouse)
         self.tags = QListWidget(focusPolicy=Qt.NoFocus, contextMenuPolicy=Qt.CustomContextMenu)
-        self.tags.itemActivated.connect(lambda it: self.main.search(it.text()))
+        self.tags.itemActivated.connect(lambda it: self.main.open_tag(it.text(), it.data(Qt.UserRole) or ""))
         self.tags.customContextMenuRequested.connect(self.tag_menu)
+        self.anim = QTimer(self, singleShot=True, timeout=self.step)
 
         def btn(text, fn):
             b = QPushButton(text, focusPolicy=Qt.NoFocus)
@@ -434,14 +1143,18 @@ class Viewer(QDialog):
             return b
         self.fav = btn("♥ Favorite (F)", lambda: (self.main.toggle_fav(self.post()), self.refresh_info()))
         self.play = btn("▶ Play in mpv", self.play_video)
+        self.px_btn = btn("Open on Pixiv", lambda: webbrowser.open(f"https://www.pixiv.net/artworks/{self.post()['pixiv_id']}"))
+        self.find_btn = btn("Find on Danbooru", self.find_booru)
+        self.like_btn = btn("More like this (Pixiv)", lambda: self.main.open_feed(
+            f"related:{self.post()['pixiv_id']}", f"like PX {self.post()['pixiv_id']}", [("pixiv", "related", self.post()["pixiv_id"])]))
         self.pages = QLabel()
         nav = QHBoxLayout()
         for w in (btn("◀", lambda: self.show_row(self.row - 1)), btn("▶", lambda: self.show_row(self.row + 1))):
             nav.addWidget(w)
         side = QVBoxLayout()
         side.addLayout(nav)
-        for w in (self.pages, self.info, QLabel("Tags (double-click = search, right-click = more)"), self.tags,
-                  btn("⬇ Download (D)", lambda: self.main.download(self.post())), self.fav, self.play,
+        for w in (self.pages, self.info, QLabel("Tags (double-click = open tab, right-click = more)"), self.tags,
+                  btn("⬇ Download (D)", self.download), self.fav, self.play, self.px_btn, self.find_btn, self.like_btn,
                   btn("Open page", lambda: webbrowser.open(self.post()["page"]))):
             side.addWidget(w)
         sidew = QWidget()
@@ -453,11 +1166,14 @@ class Viewer(QDialog):
 
         for key, fn in ((Qt.Key_Left, lambda: self.show_row(self.row - 1)), (Qt.Key_Right, lambda: self.show_row(self.row + 1)),
                         (Qt.Key_PageUp, lambda: self.flip(-1)), (Qt.Key_PageDown, lambda: self.flip(1)),
-                        (Qt.Key_D, lambda: self.main.download(self.post())), (Qt.Key_F, self.fav.click)):
+                        (Qt.Key_D, self.download), (Qt.Key_F, self.fav.click)):
             QShortcut(QKeySequence(key), self, fn)
 
     def post(self):
         return self.grid.item(self.row).data(Qt.UserRole)
+
+    def download(self):
+        self.main.download(self.post(), self.grid.feed.label if self.grid.feed else "favorites")
 
     def open(self, grid, row):
         self.grid = grid
@@ -473,28 +1189,42 @@ class Viewer(QDialog):
             self.row, self.pg = row, 0
             self.grid.setCurrentRow(row)
             self.load()
-        elif row >= self.grid.count() and self.grid is self.main.results:
-            self.main.more()  # walked off the end: fetch next page, press → again
+        elif row >= self.grid.count() and self.grid.feed:
+            self.grid.feed.more()  # walked off the end: fetch next page, press → again
 
     def flip(self, d):
         if 0 <= self.pg + d < len(self.post()["files"]):
             self.pg += d
             self.load()
 
+    def current(self, key):
+        it = self.grid.item(self.row)
+        return it and key == (self.row, self.pg, it.data(Qt.UserRole)["id"])  # grid not cleared, viewer didn't move on
+
     def load(self):
         p = self.post()
         self.setWindowTitle(f"{SITES[p['site']]} #{p['id']}")
         self.tags.clear()
-        self.tags.addItems(p["tags"])
+        for cat, tags in [(c, p["cats"][c]) for c in CAT_COLOR if p["cats"].get(c)] if p.get("cats") else [("", p["tags"])]:
+            for t in tags:
+                it = QListWidgetItem(t)
+                it.setData(Qt.UserRole, cat)
+                if cat:
+                    it.setForeground(QColor(CAT_COLOR[cat]))
+                self.tags.addItem(it)
         self.refresh_info()
         self.play.setVisible(p["video"])
+        self.px_btn.setVisible(bool(p.get("pixiv_id")))
+        self.like_btn.setVisible(bool(p.get("pixiv_id")))
+        self.find_btn.setVisible(p["site"] == "pixiv")
         url = p["thumb"] if p["video"] else p["samples"][self.pg]
         key, self.pix = (self.row, self.pg, p["id"]), None
+        self.anim.stop()
+        self.frames = []
         self.img.setText("loading…")
 
         def done(img, err):
-            it = self.grid.item(self.row)
-            if not it or key != (self.row, self.pg, it.data(Qt.UserRole)["id"]):  # grid cleared or moved on
+            if not self.current(key) or self.frames:
                 return
             if err or img.isNull():
                 self.img.setText(f"failed: {err}")
@@ -502,14 +1232,31 @@ class Viewer(QDialog):
                 self.pix = QPixmap.fromImage(img)
                 self.rescale()
         run(lambda: QImage.fromData(http(url)), done, "view")
+        if p.get("ugoira"):
+            conf = self.main.conf
+
+            def frames(res, err):
+                if self.current(key) and res:
+                    self.frames, self.fi = [(QPixmap.fromImage(i), d) for i, d in res], 0
+                    self.step()
+            run(lambda: ugoira_frames(conf, p["id"]), frames, "view")
+
+    def step(self):
+        if self.frames and self.isVisible():
+            self.pix, delay = self.frames[self.fi]
+            self.rescale()
+            self.fi = (self.fi + 1) % len(self.frames)
+            self.anim.start(max(delay, 16))
 
     def refresh_info(self):
         p = self.post()
         n = len(p["files"])
+        alt = p.get("alt")
         self.pages.setText(f"page {self.pg + 1}/{n} (PgUp/PgDn)" if n > 1 else "")
         self.pages.setVisible(n > 1)
         self.info.setText(f"<b>{SITES[p['site']]} #{p['id']}</b><br>{p['w']}×{p['h']}  rating:{p['rating']}"
-                          f"<br>{self.row + 1}/{self.grid.count()} (←/→)")
+                          + (f"<br>also on {SITES[alt['site']]} #{alt['id']} ({len(alt['files'])} pages)" if alt else "")
+                          + f"<br>{self.row + 1}/{self.grid.count()} (←/→)")
         self.fav.setText(("♥ Unfavorite" if self.main.is_fav(p) else "♡ Favorite") + " (F)")
 
     def rescale(self):
@@ -520,6 +1267,10 @@ class Viewer(QDialog):
         super().resizeEvent(e)
         self.rescale()
 
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self.anim.stop()
+
     def play_video(self):
         p = self.post()
         url = next((u for u in p["samples"] + p["files"] if Path(urllib.parse.urlparse(u).path).suffix in (".mp4", ".webm")), p["files"][0])
@@ -528,14 +1279,30 @@ class Viewer(QDialog):
         except FileNotFoundError:  # no mpv (typical on Windows): let the browser play it
             webbrowser.open(p["page"])
 
+    def find_booru(self):
+        """Swap a Pixiv tile for its Danbooru copy (real tags), keeping the Pixiv post as alt."""
+        p, row, grid, conf = self.post(), self.row, self.grid, self.main.conf
+
+        def done(r, e):
+            if e or not r:
+                return self.main.statusBar().showMessage(f"Pixiv #{p['id']} is not on Danbooru" + (f": {e}" if e else ""))
+            it = grid.item(row)
+            if it and it.data(Qt.UserRole)["id"] == p["id"]:
+                grid.set_post(it, {**r[0], "alt": p})
+                if self.grid is grid and self.row == row:
+                    self.load()
+        run(lambda: search_danbooru(conf, f"pixiv:{p['pixiv_id']}", 1), done)
+
     def tag_menu(self, pos):
         it = self.tags.itemAt(pos)
         if not it:
             return
-        t, m, q = it.text(), QMenu(self), self.main.q.text().strip()
+        t, cat, m, q = it.text(), it.data(Qt.UserRole) or "", QMenu(self), self.main.q.text().strip()
+        m.addAction("Open tab", lambda: self.main.open_tag(t, cat))
         m.addAction("Search", lambda: self.main.search(t))
         m.addAction("Add to query", lambda: self.main.search(f"{q} {t}".strip()))
         m.addAction("Exclude from query", lambda: self.main.search(f"{q} -{t}".strip()))
+        m.addAction("Follow", lambda: self.main.toggle_follow(("artist:" if cat == "artist" else "tag:") + t))
         m.addAction("Blacklist", lambda: self.main.blacklist_add(t))
         m.addAction("Copy", lambda: QApplication.clipboard().setText(t))
         m.exec(self.tags.mapToGlobal(pos))
@@ -586,13 +1353,12 @@ class Main(QMainWindow):
         self.setWindowTitle("imagesearcher")
         self.resize(1400, 900)
         self.conf = load_conf()
-        self.query, self.page, self.gen, self.loading, self.active, self.errs = "", 0, 0, False, [], {}
-        self.cancel = None
+        self.query, self.cancel, self.dyn = "", None, {}
 
         self.cb = {s: QCheckBox(n, checked=s in self.conf["sites"]) for s, n in SITES.items()}
         for c in self.cb.values():
             c.toggled.connect(self.save_sites)
-        self.q = QLineEdit(placeholderText="tags…   Enter = search   (booru syntax: -tag, rating:g, order:score)")
+        self.q = QLineEdit(placeholderText="tags…   Enter = search   (booru syntax: -tag, rating:g, order:score; Pixiv gets the translated tags)")
         self.q.returnPressed.connect(lambda: self.search())
         self.saved = QComboBox(minimumContentsLength=18)
         self.saved.activated.connect(lambda i: i and self.search(self.saved.itemText(i)))
@@ -607,19 +1373,21 @@ class Main(QMainWindow):
             top.addWidget(c)
         top.addWidget(self.q, 1)
         for w in (QPushButton("Search", clicked=lambda: self.search()), self.saved, self.star,
-                  QPushButton("⬇ Bulk", toolTip="Download every result of this search", clicked=self.bulk),
+                  QPushButton("⬇ Bulk", toolTip="Download every result of the current tab", clicked=lambda: self.bulk()),
                   self.history_cb, QPushButton("📂", toolTip=f"Open history folder: {HISTORY_DIR}", clicked=self.open_history),
                   QPushButton("⚙", toolTip="Settings", clicked=self.settings)):
             top.addWidget(w)
 
         self.viewer = Viewer(self)
         self.viewer.finished.connect(self.refresh_favs)
-        self.results, self.favs = Grid(self.viewer.open), Grid(self.viewer.open)
-        self.results.verticalScrollBar().valueChanged.connect(
-            lambda v: v >= self.results.verticalScrollBar().maximum() - THUMB and self.more())
-        self.tabs = QTabWidget()
-        self.tabs.addTab(self.results, "Results")
-        self.tabs.addTab(self.favs, "Favorites")
+        self.tabs = QTabWidget(tabsClosable=True)
+        self.results, self.tags_tab, self.new, self.favs = Feed(self), TagsTab(self), NewFeed(self), Grid(self.viewer.open)
+        for w, t in ((self.results, "Search"), (self.tags_tab, "Tags"), (self.new, "New"), (self.favs, "Favorites")):
+            self.tabs.addTab(w, t)
+            for side in (QTabBar.LeftSide, QTabBar.RightSide):  # fixed tabs: no close button
+                self.tabs.tabBar().setTabButton(self.tabs.count() - 1, side, None)
+        self.tabs.tabCloseRequested.connect(self.close_tab)
+        self.tabs.setCurrentWidget(self.tags_tab)
 
         central = QWidget()
         lay = QVBoxLayout(central)
@@ -642,6 +1410,68 @@ class Main(QMainWindow):
         self.refresh_saved()
         self.refresh_favs()
 
+    # --- tabs ---
+    def open_tab(self, key, title, make):
+        """Focus the tab for key, creating it with make() the first time."""
+        w = self.dyn.get(key)
+        if w is None:
+            w = self.dyn[key] = make()
+            w.key = key
+            self.tabs.addTab(w, title[:32])
+            log.info("open tab %s", key)
+        self.tabs.setCurrentWidget(w)
+
+    def close_tab(self, i):
+        w = self.tabs.widget(i)
+        if not hasattr(w, "key"):
+            return
+        for f in [w, getattr(w, "booru", None), getattr(w, "px", None)]:  # a tag tab, or an artist's two panes
+            if isinstance(f, Feed):
+                f.stop()  # late replies are dropped instead of paging on in the background
+                if self.viewer.grid is f.grid:
+                    self.viewer.hide()
+        self.tabs.removeTab(i)
+        del self.dyn[w.key]
+        w.setParent(None)  # freed by Python once pending callbacks let go of it
+
+    def open_tag(self, tag, cat="", pixiv=None):
+        if cat == "artist":
+            return self.open_artist(tag)
+        if CJK.search(tag) and pixiv is None:  # a Pixiv tag: open the booru tag whose wiki lists it, Pixiv pinned
+            return run(lambda: dan("wiki_pages", **{"search[other_names_match]": tag, "only": "title", "limit": 1}),
+                       lambda r, e: self.open_tag(r[0]["title"] if r and not e else "", "", tag))
+        self.open_tab(f"tag:{tag}|{pixiv or ''}", tag or pixiv, lambda: TagView(self, tag, pixiv))
+
+    def open_artist(self, tag):
+        self.open_tab(f"artist:{tag}", f"🎨 {tag}", lambda: ArtistView(self, tag))
+
+    def open_pool(self, pid, name):
+        self.open_tab(f"pool:{pid}", f"▤ {name}", lambda: TagView(self, f"ordpool:{pid}", sites=["danbooru"], title=name.replace("_", " ")))
+
+    def open_feed(self, key, title, srcs):
+        def make():
+            f = Feed(self, title)
+            f.start(srcs)
+            return f
+        self.open_tab(key, title, make)
+
+    def link(self, href, tag=""):
+        """Rich-text links: tag:<cat>:<name> opens a tag/artist tab, px::<word> opens tag with Pixiv pinned to word."""
+        kind, cat, text = href.split(":", 2)
+        text = urllib.parse.unquote(text)
+        if kind == "px":
+            self.open_tag(tag or "", pixiv=text)
+        elif kind == "tag":
+            self.open_tag(text, cat)
+
+    def current_feed(self):
+        w = self.tabs.currentWidget()
+        return w if isinstance(w, Feed) else getattr(w, "booru", self.results)
+
+    def set_new_count(self, n):
+        if hasattr(self, "new"):  # NewFeed reports while it is still being built
+            self.tabs.setTabText(self.tabs.indexOf(self.new), f"New ({n})" if n else "New")
+
     # --- search ---
     def save_sites(self):
         self.conf["sites"] = [s for s, c in self.cb.items() if c.isChecked()]
@@ -660,56 +1490,14 @@ class Main(QMainWindow):
     def search(self, q=None):
         self.query = (self.q.text() if q is None else q).strip()
         self.q.setText(self.query)
-        self.gen += 1
-        self.page, self.loading, self.errs = 0, False, {}
-        self.active = [s for s, c in self.cb.items() if c.isChecked()]
-        if self.viewer.grid is self.results:
-            self.viewer.hide()  # its post is about to be cleared
-        self.results.restart()
+        sites = [s for s, c in self.cb.items() if c.isChecked()]
         self.tabs.setCurrentWidget(self.results)
         self.star.setText("★" if self.query in self.conf["saved"] else "☆")
-        if not self.active:
+        if not sites:
             self.statusBar().showMessage("Tick at least one site")
         else:
-            log.info("search '%s' on %s", self.query, ", ".join(self.active))
-        self.more()
-
-    def more(self):
-        if self.loading or not self.active:
-            return
-        self.loading = True
-        self.page += 1
-        gen, sites, page, query = self.gen, list(self.active), self.page, self.query
-        self.statusBar().showMessage(f"Loading page {page}…")
-        run(lambda: fetch_all(sites, self.conf, query, page), lambda r, e: self.got(gen, r, e))
-
-    def got(self, gen, res, err):
-        if gen != self.gen:
-            return
-        self.loading = False
-        if err:
-            log.error("search '%s' failed: %s", self.query, err)
-            self.statusBar().showMessage(str(err))
-            return
-        lists, errs = res
-        for s, e in errs.items():
-            if s not in self.errs:
-                log.warning(e)
-        self.errs.update(errs)  # sticky: a site that failed on page 1 stays explained
-        self.active = [s for s in self.active if lists[s]]  # drop exhausted/broken sites from paging
-        bl = set(self.conf["blacklist"])
-        posts = [p for p in interleave(lists.values()) if allowed(p, bl)]
-        self.results.add(posts)
-        counts = "  ".join(f"{SHORT[s]}:{len(l)}" for s, l in lists.items())
-        msg = f"'{self.query}' page {self.page} — {self.results.count()} posts ({counts})"
-        if self.errs:
-            msg += "  |  " + "  ".join(self.errs.values())
-        if not self.active:
-            msg += "  — end of results"
-        self.statusBar().showMessage(msg)
-        log.info("'%s' page %d: %s", self.query, self.page, counts)
-        if self.active and self.results.verticalScrollBar().maximum() == 0:
-            QTimer.singleShot(0, self.more)  # page didn't fill the window
+            log.info("search '%s' on %s", self.query, ", ".join(sites))
+        self.results.start([(s, "tags", self.query) for s in sites], self.query)
 
     # --- autocomplete ---
     def autocomplete(self):
@@ -736,7 +1524,7 @@ class Main(QMainWindow):
         neg = "-" if last.startswith("-") else ""
         self.q.setText(f"{head} {neg}{index.data(Qt.UserRole)} ".lstrip())
 
-    # --- saved searches / favorites / blacklist ---
+    # --- saved searches / favorites / follows / blacklist ---
     def refresh_saved(self):
         self.saved.clear()
         self.saved.addItems(["Saved searches…"] + self.conf["saved"])
@@ -770,7 +1558,36 @@ class Main(QMainWindow):
     def refresh_favs(self):
         self.favs.restart()
         self.favs.add(self.conf["favorites"])
-        self.tabs.setTabText(1, f"Favorites ({len(self.conf['favorites'])})")
+        self.tabs.setTabText(self.tabs.indexOf(self.favs), f"Favorites ({len(self.conf['favorites'])})")
+
+    def toggle_follow(self, key, uid=None):
+        """Follow / unfollow "tag:x" or "artist:x" -> now following? New follows start at the newest post (nothing unread)."""
+        f = self.conf["follows"]
+        if key in f:
+            del f[key]
+            save_conf(self.conf)
+            log.info("unfollow %s", key)
+            self.new.reload()
+            return False
+        tag, conf = key.split(":", 1)[1], self.conf
+        srcs = [(s, "tags", tag) for s in BOORUS if self.cb[s].isChecked()] or [("danbooru", "tags", tag)]
+        srcs += [("pixiv", "user", uid)] if uid else []
+        f[key] = {"uid": uid} if uid else {}
+        log.info("follow %s", key)
+
+        def seed():
+            lists, errs = fetch_all(srcs, conf, 1)
+            return {s[0]: max((int(p["id"]) for p in l), default=0) for s, l in lists.items() if s not in errs}
+
+        def done(r, e):
+            if key in f:
+                f[key].update(r or {})
+                save_conf(self.conf)
+                self.new.reload()
+            if e or not r:
+                self.statusBar().showMessage(f"Following {key}, but no site answered: {e or 'check keys in Settings'}")
+        run(seed, done)
+        return True
 
     def blacklist_add(self, tag):
         self.conf["blacklist"] = sorted(set(self.conf["blacklist"]) | {tag.lower()})
@@ -779,28 +1596,31 @@ class Main(QMainWindow):
         self.statusBar().showMessage(f"Blacklisted '{tag}' (applies to new searches)")
 
     # --- downloads ---
-    def download(self, p):
-        query, root = self.query, self.conf["download_dir"]
+    def download(self, p, label):
+        if p.get("alt") and len(p["alt"]["files"]) > len(p["files"]):  # the Pixiv original has more pages than the booru copy
+            p = p["alt"]
+        root, conf = self.conf["download_dir"], self.conf
         self.statusBar().showMessage(f"Downloading {SITES[p['site']]} #{p['id']}…")
+
         def done(r, e):
             msg = f"download {p['site']} #{p['id']}: " + (f"failed: {e}" if e else f"saved {r[0]}, already had {r[1]}")
             (log.error if e else log.info)(msg)
             self.statusBar().showMessage(msg)
-        run(lambda: download_post(p, root, query), done)
+        run(lambda: download_post(p, root, label, conf=conf), done)
 
-    def bulk(self):
+    def bulk(self, feed=None):
         if self.cancel:
             return self.statusBar().showMessage("A bulk download is already running")
-        query = self.q.text().strip()
-        sites = [s for s, c in self.cb.items() if c.isChecked()]
-        if not sites:
-            return
-        limit, ok = QInputDialog.getInt(self, "Bulk download", f"Download '{query}' from {', '.join(SITES[s] for s in sites)}\n"
+        feed = feed or self.current_feed()
+        query, srcs, keep = feed.label, list(feed.srcs), feed.keep
+        if not srcs:
+            return self.statusBar().showMessage("Nothing to download in this tab")
+        limit, ok = QInputDialog.getInt(self, "Bulk download", f"Download '{query}' from {', '.join(dict.fromkeys(SITES[s[0]] for s in srcs))}\n"
                                         f"into {self.conf['download_dir']}\n\nMax posts (0 = all):", 0, 0, 10 ** 6)
         if not ok:
             return
         self.cancel = cancel = threading.Event()
-        log.info("bulk '%s' on %s, max %s", query, ", ".join(sites), limit or "all")
+        log.info("bulk '%s' on %s, max %s", query, srcs, limit or "all")
         self.cancel_btn.show()
         conf, bl, root = self.conf, set(self.conf["blacklist"]), self.conf["download_dir"]
 
@@ -810,19 +1630,19 @@ class Main(QMainWindow):
 
         def work():
             st = {"new": 0, "skip": 0, "fail": 0, "page": 0, "posts": 0, "err": ""}
-            active = sites
+            active = srcs
             while active and not cancel.is_set() and not (limit and st["posts"] >= limit):
                 st["page"] += 1
-                lists, errs = fetch_all(active, conf, query, st["page"])
+                lists, errs = fetch_all(active, conf, st["page"])
                 st["err"] = "  ".join(errs.values())
                 active = [s for s in active if lists[s]]
-                posts = [p for p in interleave(lists.values()) if allowed(p, bl)]
+                posts = [p for p in interleave(lists.values()) if allowed(p, bl) and (not keep or keep(p))]
                 if limit:
                     posts = posts[:limit - st["posts"]]
                 st["posts"] += len(posts)
                 # ponytail: 4 parallel downloads per page, polite enough for boorus; Pixiv may still 429 on huge runs
                 with ThreadPoolExecutor(4) as ex:
-                    for f in [ex.submit(download_post, p, root, query, cancel) for p in posts]:
+                    for f in [ex.submit(download_post, p, root, query, cancel, conf) for p in posts]:
                         try:
                             n, s = f.result()
                             st["new"] += n
@@ -867,36 +1687,74 @@ class Main(QMainWindow):
 def selftest():
     db = parse_danbooru([
         {"id": 1, "file_url": "https://cdn.donmai.us/original/a.png", "large_file_url": "https://cdn.donmai.us/sample/a.jpg",
-         "tag_string": "1girl solo", "rating": "g", "image_width": 10, "image_height": 20,
+         "tag_string": "1girl solo", "rating": "g", "image_width": 10, "image_height": 20, "md5": "aa", "pixiv_id": 7,
+         "tag_string_artist": "foo", "tag_string_general": "1girl solo",
          "media_asset": {"variants": [{"type": "360x360", "url": "https://cdn.donmai.us/360/a.jpg"}]}},
         {"id": 2, "tag_string": "gold_only"},  # no file -> skipped
     ])
     assert len(db) == 1 and db[0]["thumb"].endswith("360/a.jpg") and db[0]["samples"][0].endswith("sample/a.jpg")
     assert db[0]["tags"] == ["1girl", "solo"] and not db[0]["video"]
+    assert db[0]["pixiv_id"] == "7" and db[0]["cats"]["artist"] == ["foo"] and db[0]["cats"]["copyright"] == []
 
     gb = parse_gel("gelbooru", {"@attributes": {"count": 1}, "post": [
         {"id": 5, "file_url": "https://img.gelbooru.com/x.webm", "preview_url": "p.jpg", "sample_url": "", "sample": 0,
-         "tags": "a b", "rating": "sensitive"}]})
+         "tags": "a b", "rating": "sensitive", "md5": "bb", "source": "https://www.pixiv.net/en/artworks/7"}]})
     assert gb[0]["video"] and gb[0]["rating"] == "s" and gb[0]["samples"] == gb[0]["files"]
+    assert gb[0]["pixiv_id"] == "7" and gb[0]["md5"] == "bb"
     assert parse_gel("gelbooru", {"@attributes": {"count": 0}}) == []
     r34 = parse_gel("rule34", [{"id": 9, "file_url": "https://r34/x.jpg", "sample_url": "https://r34/s.jpg", "sample": True,
-                                "preview_url": "https://r34/t.jpg", "tags": " foo  bar ", "rating": "safe"}])
+                                "preview_url": "https://r34/t.jpg", "tags": " foo  bar ", "rating": "safe", "hash": "aa"}])
     assert r34[0]["samples"] == ["https://r34/s.jpg"] and r34[0]["rating"] == "g" and r34[0]["tags"] == ["foo", "bar"]
     assert "rule34.xxx" in r34[0]["page"] and parse_gel("rule34", None) == []
+    assert px_id("https://i.pximg.net/img-original/img/2007/09/09/22/14/07/20_p0.jpg") == "20"
+    assert px_id("https://www.pixiv.net/member_illust.php?mode=medium&illust_id=33") == "33"
+    assert px_id("https://x.com/a/status/1") is None and px_id(None) is None
+    assert PX_USER.search("https://www.pixiv.net/users/1039353")[1] == "1039353"
+    assert PX_USER.search("http://www.pixiv.net/member.php?id=55")[1] == "55" and not PX_USER.search("https://sketch.pixiv.net/@igix")
 
     px = parse_pixiv({"illusts": [
         {"id": 7, "x_restrict": 1, "image_urls": {"square_medium": "sq", "large": "lg"}, "meta_single_page": {},
          "meta_pages": [{"image_urls": {"original": "https://i.pximg.net/o_p0.png", "large": "l0"}},
                         {"image_urls": {"original": "https://i.pximg.net/o_p1.png", "large": "l1"}}],
          "tags": [{"name": "オリジナル", "translated_name": "original"}, {"name": "女の子"}]},
-        {"id": 8, "x_restrict": 0, "image_urls": {"square_medium": "sq", "large": "lg"},
+        {"id": 8, "x_restrict": 0, "type": "ugoira", "image_urls": {"square_medium": "sq", "large": "lg"},
          "meta_single_page": {"original_image_url": "https://i.pximg.net/o.jpg"}, "meta_pages": [], "tags": []}]})
     assert len(px[0]["files"]) == 2 and px[0]["samples"] == ["l0", "l1"] and px[0]["rating"] == "e"
     assert px[0]["tags"] == ["オリジナル", "original", "女の子"] and px[1]["files"] == ["https://i.pximg.net/o.jpg"]
+    assert px[1]["ugoira"] and not px[0]["ugoira"] and px[0]["pixiv_id"] == "7"
 
     assert [p["id"] for p in interleave([db, px, r34])] == ["1", "7", "9", "8"]
     assert not allowed(px[0], {"original"}) and not allowed(px[0], {"rating:e"}) and allowed(px[1], {"rating:e"})
     assert not allowed(db[0], {"1girl"}) and allowed(db[0], {"2girls"})
+    assert rating_ok(px[1], {"s"}) and not rating_ok(px[0], {"g", "s"}) and rating_ok(px[0], {"q"})
+    assert rating_ok(gb[0], {"s"}) and not rating_ok(gb[0], {"g"})
+
+    # tag bridge, offline: the wiki cache is pre-filled and lookup is off
+    conf = {"pixiv_map": {"hatsune_miku": "初音ミク", "1girl": ""}}
+    assert pixiv_query(conf, "hatsune_miku 1girl -solo rating:g order:score re:zero_x", False) == ("初音ミク", True, True)
+    assert pixiv_query(conf, "1girl blue_hair_(x) rating:e,q", False) == ("1girl blue hair", False, False)
+    assert pixiv_query(conf, "初音ミク ordpool:5 -rating:e", False) == ("初音ミク", True, False)
+    assert pixiv_query(conf, "id:>5 pool:3", False)[0] == ""
+    assert sorted(["长发", "長髪", "ロングヘア"], key=lambda n: not KANA.search(n))[0] == "ロングヘア"
+
+    # dedupe, both arrival orders: Danbooru #1 is Pixiv #7, R34 #9 has Danbooru's md5
+    seen = {}
+    a, new_a = fold(seen, db[0])
+    assert new_a and fold(seen, px[0]) == (a, False) and a[0]["site"] == "danbooru" and a[0]["alt"]["id"] == "7"
+    assert fold(seen, r34[0]) is None and fold(seen, px[0]) is None
+    seen = {}
+    b, _ = fold(seen, px[0])
+    assert fold(seen, db[0]) == (b, False) and b[0]["site"] == "danbooru" and b[0]["alt"]["site"] == "pixiv"
+    assert fold(seen, gb[0])[1] is True  # another booru post of the same Pixiv work keeps its own tile
+
+    assert follow_srcs({"tag:miku": {"danbooru": 5, "rule34": 9}, "artist:x": {"uid": "3", "pixiv": 100, "danbooru": 0}}) == {
+        ("danbooru", "tags", "miku id:>5"): ("tag:miku", "danbooru"), ("rule34", "tags", "miku id:>9"): ("tag:miku", "rule34"),
+        ("pixiv", "user", "3>100"): ("artist:x", "pixiv"), ("danbooru", "tags", "x id:>0"): ("artist:x", "danbooru")}
+    assert dtext("h4. Hi\n[[hatsune_miku|Miku]] and [[vocaloid]] [b]x[/b]") == "Hi\nMiku and vocaloid x"
+    assert link("tag", "a b", "artist").startswith("<a href='tag:artist:a%20b' style='color:#e0474c'>")
+    assert parse_gel_tags("rule34", b'<tags><tag type="4" count="3" name="miku" id="1"/></tags>') == [
+        {"type": "4", "count": "3", "name": "miku", "id": "1"}]
+    assert parse_gel_tags("gelbooru", b'{"@attributes":{}, "tag":[{"name":"a","count":1,"type":0}]}')[0]["name"] == "a"
 
     assert dest("/d", px[0], 1, "blue/hair *") == Path("/d/pixiv/blue_hair _/pixiv_7_p1.png")
     assert dest("/d", db[0], 0, "") == Path("/d/danbooru/_all/danbooru_1.png")
@@ -926,6 +1784,7 @@ def main():
     app.setDesktopFileName("imagesearcher")
     bridge = Bridge()
     w = Main()
+    app.aboutToQuit.connect(lambda: save_conf(w.conf))  # keeps the Pixiv tag cache
     log.info("started")
     w.show()
     code = app.exec()
