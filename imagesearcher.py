@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """imagesearcher: Danbooru / Gelbooru / Rule34.xxx / Pixiv browser and downloader."""
 import hashlib
+import importlib.util
 import itertools
 import json
 import os
@@ -20,8 +21,9 @@ from pathlib import Path
 try:
     import PySide6.QtWidgets  # noqa: F401
 except ImportError as e:  # first double-click on a plain Python install (e.g. Windows): fetch PySide6, then restart
+    # only install when PySide6 is truly absent; installed-but-broken gets the error, not a reinstall.
     # one attempt only: if the fresh install still can't import, a restart loop would fork-bomb the machine
-    if os.environ.get("IMAGESEARCHER_PIP_TRIED"):
+    if importlib.util.find_spec("PySide6") or os.environ.get("IMAGESEARCHER_PIP_TRIED"):
         input(f"PySide6 is installed but can't load: {e}\nPress Enter to close.")
         sys.exit(1)
     print("First run: installing PySide6, this takes a minute or two. Keep this window open...")
