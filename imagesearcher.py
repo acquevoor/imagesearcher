@@ -653,7 +653,7 @@ THUMBS = {}  # ponytail: unbounded in-memory cache, fine for a browsing session;
 class Grid(QListWidget):
     def __init__(self, on_open):
         super().__init__()
-        self.gen, self.feed = 0, None
+        self.gen, self.feed, self.on_open = 0, None, on_open
         self.setViewMode(QListWidget.IconMode)
         self.setIconSize(QSize(THUMB, THUMB))
         self.setGridSize(QSize(THUMB + 12, THUMB + 28))
@@ -663,6 +663,12 @@ class Grid(QListWidget):
         self.blank = QPixmap(THUMB, THUMB)
         self.blank.fill(Qt.transparent)
         self.itemActivated.connect(lambda it: on_open(self, self.row(it)))
+
+    def mouseReleaseEvent(self, e):
+        it = self.itemAt(e.position().toPoint()) if e.button() == Qt.MiddleButton else None
+        if it:
+            self.on_open(self, self.row(it), True)
+        super().mouseReleaseEvent(e)
 
     def restart(self):
         self.gen += 1
@@ -717,7 +723,7 @@ class Feed(QWidget):
         self.keep = self.mark = None  # optional post filter / tile decorator
         self.gen = self.page = 0
         self.loading, self.active, self.errs, self.seen = False, [], {}, {}
-        self.grid = Grid(main.viewer.open)
+        self.grid = Grid(main.open_image)
         self.grid.feed = self
         self.status = QLabel(wordWrap=True)
         self.lay = QVBoxLayout(self)
@@ -731,8 +737,6 @@ class Feed(QWidget):
         self.srcs, self.label = list(srcs), self.label if label is None else label
         self.gen += 1
         self.page, self.loading, self.errs, self.seen, self.active = 0, False, {}, {}, list(self.srcs)
-        if self.main.viewer.grid is self.grid:
-            self.main.viewer.hide()  # its post is about to be cleared
         self.grid.restart()
         self.status.setText("Nothing to search." + self.note if not self.srcs else "")
         self.more()
@@ -906,7 +910,7 @@ class NewFeed(Feed):
         self.main.set_new_count("")
 
     def auto(self):
-        if not (self.main.viewer.isVisible() and self.main.viewer.grid is self.grid):
+        if not self.isVisible():  # don't reshuffle the grid under the user's eyes
             self.reload()
 
     def loaded(self, lists):
@@ -1124,38 +1128,81 @@ class TagsTab(QWidget):
             self.follow.setText("★ Following" if on else "☆ Follow")
 
 
-class Viewer(QDialog):
-    def __init__(self, main):
-        super().__init__(main)
-        self.main, self.grid, self.row, self.pg, self.pix, self.frames, self.fi = main, None, 0, 0, None, [], 0
-        self.resize(1300, 900)
+def same(a, b):
+    return a["site"] == b["site"] and a["id"] == b["id"]
+
+
+class ImageTabs(QTabWidget):
+    """The second tab row: a top tab's grid (fixed, first) plus one closable tab per opened image, browser style.
+    Double-click opens and shows an image; Ctrl+double-click or middle-click opens it in the background."""
+
+    def __init__(self, main, home, title="▦ Grid"):
+        super().__init__(tabsClosable=True, documentMode=True)
+        self.main, self.home = main, home
+        home.imgtabs = self
+        self.addTab(home, title)
+        for side in (QTabBar.LeftSide, QTabBar.RightSide):
+            self.tabBar().setTabButton(0, side, None)
+        self.tabCloseRequested.connect(self.close_image)
+        self.currentChanged.connect(lambda i: self.widget(i) and self.widget(i).setFocus())
+        for key, fn in (("Ctrl+W", lambda: self.close_image(self.currentIndex())), ("Escape", lambda: self.setCurrentIndex(0)),
+                        ("Ctrl+Tab", lambda: self.setCurrentIndex((self.currentIndex() + 1) % self.count())),
+                        ("Ctrl+Shift+Tab", lambda: self.setCurrentIndex((self.currentIndex() - 1) % self.count()))):
+            QShortcut(QKeySequence(key), self, fn).setContext(Qt.WidgetWithChildrenShortcut)
+
+    def open_image(self, grid, row, background=False):
+        p = grid.item(row).data(Qt.UserRole)
+        v = next((self.widget(i) for i in range(1, self.count()) if same(self.widget(i).p, p)), None)
+        if v is None:
+            v = Viewer(self.main, self, grid, row)
+            self.addTab(v, "")
+            v.load()
+            log.info("view %s #%s", p["site"], p["id"])
+        if not background:
+            self.setCurrentWidget(v)
+
+    def close_image(self, i):
+        if i > 0:
+            w = self.widget(i)
+            w.anim.stop()
+            self.removeTab(i)
+            w.setParent(None)  # freed by Python once pending image downloads let go of it
+
+
+class Viewer(QWidget):
+    """One image tab: the picture + side panel. ←/→ walk the grid it was opened from, PgUp/PgDn flip pages."""
+
+    def __init__(self, main, tabs, grid, row):
+        super().__init__(focusPolicy=Qt.StrongFocus)
+        self.main, self.tabs, self.grid, self.row = main, tabs, grid, row
+        self.p, self.pg, self.pix, self.frames, self.fi = grid.item(row).data(Qt.UserRole), 0, None, [], 0
         self.img = QLabel(alignment=Qt.AlignCenter)
         self.img.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.info = QLabel(wordWrap=True, textInteractionFlags=Qt.TextSelectableByMouse)
         self.tags = QListWidget(focusPolicy=Qt.NoFocus, contextMenuPolicy=Qt.CustomContextMenu)
         self.tags.itemActivated.connect(lambda it: self.main.open_tag(it.text(), it.data(Qt.UserRole) or ""))
         self.tags.customContextMenuRequested.connect(self.tag_menu)
-        self.anim = QTimer(self, singleShot=True, timeout=self.step)
+        self.anim = QTimer(self, singleShot=True, timeout=self.next_frame)
 
         def btn(text, fn):
             b = QPushButton(text, focusPolicy=Qt.NoFocus)
             b.clicked.connect(fn)
             return b
-        self.fav = btn("♥ Favorite (F)", lambda: (self.main.toggle_fav(self.post()), self.refresh_info()))
+        self.fav = btn("♥ Favorite (F)", lambda: (self.main.toggle_fav(self.p), self.refresh_info()))
         self.play = btn("▶ Play in mpv", self.play_video)
-        self.px_btn = btn("Open on Pixiv", lambda: webbrowser.open(f"https://www.pixiv.net/artworks/{self.post()['pixiv_id']}"))
+        self.px_btn = btn("Open on Pixiv", lambda: webbrowser.open(f"https://www.pixiv.net/artworks/{self.p['pixiv_id']}"))
         self.find_btn = btn("Find on Danbooru", self.find_booru)
         self.like_btn = btn("More like this (Pixiv)", lambda: self.main.open_feed(
-            f"related:{self.post()['pixiv_id']}", f"like PX {self.post()['pixiv_id']}", [("pixiv", "related", self.post()["pixiv_id"])]))
+            f"related:{self.p['pixiv_id']}", f"like PX {self.p['pixiv_id']}", [("pixiv", "related", self.p["pixiv_id"])]))
         self.pages = QLabel()
         nav = QHBoxLayout()
-        for w in (btn("◀", lambda: self.show_row(self.row - 1)), btn("▶", lambda: self.show_row(self.row + 1))):
+        for w in (btn("◀", lambda: self.step(-1)), btn("▶", lambda: self.step(1))):
             nav.addWidget(w)
         side = QVBoxLayout()
         side.addLayout(nav)
         for w in (self.pages, self.info, QLabel("Tags (double-click = open tab, right-click = more)"), self.tags,
                   btn("⬇ Download (D)", self.download), self.fav, self.play, self.px_btn, self.find_btn, self.like_btn,
-                  btn("Open page", lambda: webbrowser.open(self.post()["page"]))):
+                  btn("Open page", lambda: webbrowser.open(self.p["page"]))):
             side.addWidget(w)
         sidew = QWidget()
         sidew.setLayout(side)
@@ -1164,46 +1211,43 @@ class Viewer(QDialog):
         lay.addWidget(self.img, 1)
         lay.addWidget(sidew)
 
-        for key, fn in ((Qt.Key_Left, lambda: self.show_row(self.row - 1)), (Qt.Key_Right, lambda: self.show_row(self.row + 1)),
+        for key, fn in ((Qt.Key_Left, lambda: self.step(-1)), (Qt.Key_Right, lambda: self.step(1)),
                         (Qt.Key_PageUp, lambda: self.flip(-1)), (Qt.Key_PageDown, lambda: self.flip(1)),
                         (Qt.Key_D, self.download), (Qt.Key_F, self.fav.click)):
-            QShortcut(QKeySequence(key), self, fn)
-
-    def post(self):
-        return self.grid.item(self.row).data(Qt.UserRole)
+            QShortcut(QKeySequence(key), self, fn).setContext(Qt.WidgetWithChildrenShortcut)  # only in the visible image tab
 
     def download(self):
-        self.main.download(self.post(), self.grid.feed.label if self.grid.feed else "favorites")
+        self.main.download(self.p, self.grid.feed.label if self.grid.feed else "favorites")
 
-    def open(self, grid, row):
-        self.grid = grid
-        p = grid.item(row).data(Qt.UserRole)
-        log.info("view %s #%s", p["site"], p["id"])
-        self.show_row(row)
-        self.show()
-        self.raise_()
-        self.activateWindow()
+    def locate(self):
+        """This tab's row in its grid; rows move when the grid reloads, the tab keeps its post either way."""
+        it = self.grid.item(self.row)
+        if it and same(it.data(Qt.UserRole), self.p):
+            return self.row
+        return next((i for i in range(self.grid.count()) if same(self.grid.item(i).data(Qt.UserRole), self.p)), self.row)
 
-    def show_row(self, row):
+    def step(self, d):
+        row = self.locate() + d
         if 0 <= row < self.grid.count():
-            self.row, self.pg = row, 0
+            self.row, self.p, self.pg = row, self.grid.item(row).data(Qt.UserRole), 0
             self.grid.setCurrentRow(row)
             self.load()
         elif row >= self.grid.count() and self.grid.feed:
             self.grid.feed.more()  # walked off the end: fetch next page, press → again
 
     def flip(self, d):
-        if 0 <= self.pg + d < len(self.post()["files"]):
+        if 0 <= self.pg + d < len(self.p["files"]):
             self.pg += d
             self.load()
 
     def current(self, key):
-        it = self.grid.item(self.row)
-        return it and key == (self.row, self.pg, it.data(Qt.UserRole)["id"])  # grid not cleared, viewer didn't move on
+        return key == (self.pg, self.p["site"], self.p["id"])  # still showing what was requested
 
     def load(self):
-        p = self.post()
-        self.setWindowTitle(f"{SITES[p['site']]} #{p['id']}")
+        p = self.p
+        i = self.tabs.indexOf(self)
+        self.tabs.setTabText(i, f"{SHORT[p['site']]} {p['id']}")
+        self.tabs.setTabToolTip(i, " ".join(p["tags"][:30]))
         self.tags.clear()
         for cat, tags in [(c, p["cats"][c]) for c in CAT_COLOR if p["cats"].get(c)] if p.get("cats") else [("", p["tags"])]:
             for t in tags:
@@ -1218,7 +1262,7 @@ class Viewer(QDialog):
         self.like_btn.setVisible(bool(p.get("pixiv_id")))
         self.find_btn.setVisible(p["site"] == "pixiv")
         url = p["thumb"] if p["video"] else p["samples"][self.pg]
-        key, self.pix = (self.row, self.pg, p["id"]), None
+        key, self.pix = (self.pg, p["site"], p["id"]), None
         self.anim.stop()
         self.frames = []
         self.img.setText("loading…")
@@ -1238,10 +1282,10 @@ class Viewer(QDialog):
             def frames(res, err):
                 if self.current(key) and res:
                     self.frames, self.fi = [(QPixmap.fromImage(i), d) for i, d in res], 0
-                    self.step()
+                    self.next_frame()
             run(lambda: ugoira_frames(conf, p["id"]), frames, "view")
 
-    def step(self):
+    def next_frame(self):
         if self.frames and self.isVisible():
             self.pix, delay = self.frames[self.fi]
             self.rescale()
@@ -1249,14 +1293,14 @@ class Viewer(QDialog):
             self.anim.start(max(delay, 16))
 
     def refresh_info(self):
-        p = self.post()
+        p = self.p
         n = len(p["files"])
         alt = p.get("alt")
         self.pages.setText(f"page {self.pg + 1}/{n} (PgUp/PgDn)" if n > 1 else "")
         self.pages.setVisible(n > 1)
         self.info.setText(f"<b>{SITES[p['site']]} #{p['id']}</b><br>{p['w']}×{p['h']}  rating:{p['rating']}"
                           + (f"<br>also on {SITES[alt['site']]} #{alt['id']} ({len(alt['files'])} pages)" if alt else "")
-                          + f"<br>{self.row + 1}/{self.grid.count()} (←/→)")
+                          + f"<br>{self.locate() + 1}/{self.grid.count()} (←/→, Esc = grid, Ctrl+W = close)")
         self.fav.setText(("♥ Unfavorite" if self.main.is_fav(p) else "♡ Favorite") + " (F)")
 
     def rescale(self):
@@ -1267,12 +1311,16 @@ class Viewer(QDialog):
         super().resizeEvent(e)
         self.rescale()
 
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.next_frame()  # resume an animation paused while the tab was in the background
+
     def hideEvent(self, e):
         super().hideEvent(e)
         self.anim.stop()
 
     def play_video(self):
-        p = self.post()
+        p = self.p
         url = next((u for u in p["samples"] + p["files"] if Path(urllib.parse.urlparse(u).path).suffix in (".mp4", ".webm")), p["files"][0])
         try:
             subprocess.Popen(["mpv", f"--referrer={PIXIV_REFERER}" if p["site"] == "pixiv" else "--", url])
@@ -1280,17 +1328,18 @@ class Viewer(QDialog):
             webbrowser.open(p["page"])
 
     def find_booru(self):
-        """Swap a Pixiv tile for its Danbooru copy (real tags), keeping the Pixiv post as alt."""
-        p, row, grid, conf = self.post(), self.row, self.grid, self.main.conf
+        """Swap a Pixiv post for its Danbooru copy (real tags), keeping the Pixiv post as alt, in this tab and its tile."""
+        p, conf = self.p, self.main.conf
 
         def done(r, e):
             if e or not r:
                 return self.main.statusBar().showMessage(f"Pixiv #{p['id']} is not on Danbooru" + (f": {e}" if e else ""))
-            it = grid.item(row)
-            if it and it.data(Qt.UserRole)["id"] == p["id"]:
-                grid.set_post(it, {**r[0], "alt": p})
-                if self.grid is grid and self.row == row:
-                    self.load()
+            new, it = {**r[0], "alt": p}, self.grid.item(self.locate())
+            if it and same(it.data(Qt.UserRole), p):
+                self.grid.set_post(it, new)
+            if self.p is p:
+                self.p = new
+                self.load()
         run(lambda: search_danbooru(conf, f"pixiv:{p['pixiv_id']}", 1), done)
 
     def tag_menu(self, pos):
@@ -1378,11 +1427,10 @@ class Main(QMainWindow):
                   QPushButton("⚙", toolTip="Settings", clicked=self.settings)):
             top.addWidget(w)
 
-        self.viewer = Viewer(self)
-        self.viewer.finished.connect(self.refresh_favs)
         self.tabs = QTabWidget(tabsClosable=True)
-        self.results, self.tags_tab, self.new, self.favs = Feed(self), TagsTab(self), NewFeed(self), Grid(self.viewer.open)
-        for w, t in ((self.results, "Search"), (self.tags_tab, "Tags"), (self.new, "New"), (self.favs, "Favorites")):
+        self.results, self.tags_tab, self.new, self.favs = Feed(self), TagsTab(self), NewFeed(self), Grid(self.open_image)
+        for w, t in ((ImageTabs(self, self.results), "Search"), (self.tags_tab, "Tags"), (ImageTabs(self, self.new), "New"),
+                     (ImageTabs(self, self.favs), "Favorites")):
             self.tabs.addTab(w, t)
             for side in (QTabBar.LeftSide, QTabBar.RightSide):  # fixed tabs: no close button
                 self.tabs.tabBar().setTabButton(self.tabs.count() - 1, side, None)
@@ -1415,7 +1463,7 @@ class Main(QMainWindow):
         """Focus the tab for key, creating it with make() the first time."""
         w = self.dyn.get(key)
         if w is None:
-            w = self.dyn[key] = make()
+            w = self.dyn[key] = ImageTabs(self, make())
             w.key = key
             self.tabs.addTab(w, title[:32])
             log.info("open tab %s", key)
@@ -1425,11 +1473,10 @@ class Main(QMainWindow):
         w = self.tabs.widget(i)
         if not hasattr(w, "key"):
             return
-        for f in [w, getattr(w, "booru", None), getattr(w, "px", None)]:  # a tag tab, or an artist's two panes
+        h = w.home
+        for f in [h, getattr(h, "booru", None), getattr(h, "px", None)]:  # a tag tab, or an artist's two panes
             if isinstance(f, Feed):
                 f.stop()  # late replies are dropped instead of paging on in the background
-                if self.viewer.grid is f.grid:
-                    self.viewer.hide()
         self.tabs.removeTab(i)
         del self.dyn[w.key]
         w.setParent(None)  # freed by Python once pending callbacks let go of it
@@ -1464,13 +1511,27 @@ class Main(QMainWindow):
         elif kind == "tag":
             self.open_tag(text, cat)
 
+    def open_image(self, grid, row, background=None):
+        """Open grid[row] as an image tab in the second row of the grid's own top tab."""
+        if background is None:
+            background = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+        w = grid
+        while not isinstance(w, ImageTabs):
+            w = w.parentWidget()
+        w.open_image(grid, row, background)
+
+    def show_grid(self, home):
+        self.tabs.setCurrentWidget(home.imgtabs)
+        home.imgtabs.setCurrentIndex(0)
+
     def current_feed(self):
-        w = self.tabs.currentWidget()
+        w = getattr(self.tabs.currentWidget(), "home", None)
         return w if isinstance(w, Feed) else getattr(w, "booru", self.results)
 
     def set_new_count(self, n):
-        if hasattr(self, "new"):  # NewFeed reports while it is still being built
-            self.tabs.setTabText(self.tabs.indexOf(self.new), f"New ({n})" if n else "New")
+        tab = getattr(getattr(self, "new", None), "imgtabs", None)  # NewFeed reports while it is still being built
+        if tab:
+            self.tabs.setTabText(self.tabs.indexOf(tab), f"New ({n})" if n else "New")
 
     # --- search ---
     def save_sites(self):
@@ -1491,7 +1552,7 @@ class Main(QMainWindow):
         self.query = (self.q.text() if q is None else q).strip()
         self.q.setText(self.query)
         sites = [s for s, c in self.cb.items() if c.isChecked()]
-        self.tabs.setCurrentWidget(self.results)
+        self.show_grid(self.results)
         self.star.setText("★" if self.query in self.conf["saved"] else "☆")
         if not sites:
             self.statusBar().showMessage("Tick at least one site")
@@ -1552,13 +1613,12 @@ class Main(QMainWindow):
             favs.insert(0, p)
             log.info("favorite %s #%s", p["site"], p["id"])
         save_conf(self.conf)
-        if self.viewer.grid is not self.favs:  # don't pull rows out from under an open viewer
-            self.refresh_favs()
+        self.refresh_favs()  # open image tabs keep their own post, rows may move
 
     def refresh_favs(self):
         self.favs.restart()
         self.favs.add(self.conf["favorites"])
-        self.tabs.setTabText(self.tabs.indexOf(self.favs), f"Favorites ({len(self.conf['favorites'])})")
+        self.tabs.setTabText(self.tabs.indexOf(self.favs.imgtabs), f"Favorites ({len(self.conf['favorites'])})")
 
     def toggle_follow(self, key, uid=None):
         """Follow / unfollow "tag:x" or "artist:x" -> now following? New follows start at the newest post (nothing unread)."""

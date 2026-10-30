@@ -23,14 +23,21 @@ Danbooru is the backbone, and Pixiv is reached through it:
 - Artists are linked through Danbooru's artist URLs.
 - The same image found on two sites shows as one tile (`DB+PX`). The booru copy wins because its tags are better.
 
-Tabs:
+Two rows of tabs, like a browser:
+- **Top row**: tags, artists, pools, Search, New, Favorites.
+- **Second row**: inside each top tab, its ▦ Grid plus one tab per image you open.
+  - Double-click a thumb to open it, Ctrl+double-click or middle-click to open it in the background.
+  - In an image tab: ←/→ walk the grid, PgUp/PgDn flip pages, D download, F favorite, Esc back to the grid, Ctrl+W close, Ctrl+Tab cycle.
+  - Image tabs keep their picture when the grid reloads.
+
+Top tabs:
 - **Tags**: browse Danbooru tags (or Gelbooru / R34) by category, count, name or date, with a Pixiv-name column. Pick **Pools** for Danbooru pools. Selecting a tag shows its wiki, Pixiv names and related tags. Double-click opens it in a tab.
 - **Tag tabs**: one per tag, closable. They show the boorus and Pixiv side by side, or one of them, sorted newest / score (Pixiv popular) / random, filtered by rating. Click a related tag to narrow the tab, Ctrl+click to open it in its own tab. Click a Pixiv name to pin the Pixiv side to that word.
 - **Artist tabs** (artist tags, shown red): the booru posts next to the artist's Pixiv works. Works already on Danbooru are marked ✓DB. Tick the checkbox to show only the ones that are missing.
 - **New**: ☆ Follow a tag or an artist, and their posts newer than the last ones you saw collect here, with an unread count on the tab. ✓ Mark all seen resets it. The tab checks every 15 min while the app runs.
 - **Search**: the free query box (several sites = merged results). **Favorites**.
 
-- Double-click a thumb to open the viewer: ←/→ post, PgUp/PgDn Pixiv page, D download, F favorite. Tags are coloured by category. Double-click a tag to open its tab; right-click for search / add / exclude / follow / blacklist. On Pixiv posts: *Find on Danbooru*, *More like this*. Pixiv animations (ugoira) play in place and download as frames `.zip` + delays `.json`.
+- Image tabs: tags are coloured by category. Double-click a tag to open its tab; right-click for search / add / exclude / follow / blacklist. On Pixiv posts: *Find on Danbooru*, *More like this*. Pixiv animations (ugoira) play in place and download as frames `.zip` + delays `.json`.
 - ⬇ Bulk downloads everything in the current tab to `{download dir}/{site}/{tab}/` and skips files you already have.
 - An anonymous Danbooru search allows only 2 tags, and `order:` counts as one. A Danbooru API key raises the limit.
 - Blacklist (⚙) accepts tags plus `rating:g|s|q|e`.
