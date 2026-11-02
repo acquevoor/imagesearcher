@@ -1,7 +1,11 @@
 """The window: a Boorus | Pixiv (| X, opt-in) switch over the sections, plus what they share (favorites, downloads, settings)."""
+import json
 import logging
+import os
+import platform
 import sys
 import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import Qt, QTimer, QUrl
@@ -20,6 +24,32 @@ from .core import (
 )
 from .pixiv_ui import PixivSection
 from .x_ui import XSection
+
+
+SECRETS = {"refresh_token", "auth_token", "ct0", "key"}
+
+
+def log_changes(before, after, path=""):
+    """One log line per changed setting; secrets only as set / changed / cleared."""
+    for k in sorted(set(before) | set(after)):
+        a, b, name = before.get(k), after.get(k), f"{path}{k}"
+        if isinstance(a, dict) and isinstance(b, dict):
+            log_changes(a, b, name + ".")
+        elif a != b:
+            if k in SECRETS:
+                log.info("setting %s %s", name, "cleared" if not b else "set" if not a else "changed")
+            elif isinstance(b, list) or isinstance(a, list):  # lists may hold site keys: sizes only, except the blacklist
+                if k == "blacklist":
+                    log.info("setting blacklist: +%s -%s", sorted(set(b) - set(a)) or "nothing", sorted(set(a) - set(b)) or "nothing")
+                else:
+                    log.info("setting %s: %d -> %d entries", name, len(a or []), len(b or []))
+            else:
+                log.info("setting %s: %r -> %r", name, a, b)
+
+
+def x_missing(conf):
+    c = conf["x"]
+    return [n for n, v in (("auth_token", c["auth_token"]), ("ct0", c["ct0"]), ("main account", c["seed_handle"])) if not v]
 
 
 class Settings(QDialog):
@@ -74,6 +104,11 @@ class Settings(QDialog):
         d.open()
 
     def apply(self, conf):
+        before = json.loads(json.dumps(conf))
+        self._apply(conf)
+        log_changes(before, conf)
+
+    def _apply(self, conf):
         if self.token.text().strip() != conf["pixiv"]["refresh_token"]:
             conf["pixiv"].update(refresh_token=self.token.text().strip(), user_id="", premium=False)
             pixiv.logout()
@@ -119,12 +154,21 @@ class Main(QMainWindow):
         self.cancel_btn = QPushButton("Cancel download", clicked=lambda: self.cancel and self.cancel.set())
         self.cancel_btn.hide()
         self.statusBar().addPermanentWidget(self.cancel_btn)
+        self.last_status = ""
+        self.statusBar().messageChanged.connect(self.log_status)  # everything shown down there is in the log too
         self.show_section({"pixiv": self.pixiv, "x": self.x}.get(self.conf["section"]) or self.boorus)
 
     def show_section(self, sec):
+        if self.stack.currentWidget() is not sec:
+            log.info("section -> %s", self.switch.button(self.stack.indexOf(sec)).text())
         self.stack.setCurrentWidget(sec)
         self.switch.button(self.stack.indexOf(sec)).setChecked(True)
         self.conf["section"] = "pixiv" if sec is self.pixiv else "x" if sec is self.x else "boorus"
+
+    def log_status(self, msg):
+        if msg and msg != self.last_status and not msg.startswith("Loading page"):
+            log.info("status: %s", msg)
+        self.last_status = msg or self.last_status
 
     # --- shared by both sections ---
     def toggle_history(self, on):
@@ -247,6 +291,8 @@ class Main(QMainWindow):
             self.boorus.reload_sites()  # posts-per-page lives in the engines
             log.info("settings saved")
             restart = self.conf["x"]["enabled"] != bool(self.x)
+            if self.conf["x"]["enabled"] and (miss := x_missing(self.conf)):
+                log.warning("x: enabled but not set up, missing: %s", ", ".join(miss))
             self.statusBar().showMessage("Settings saved" + ("  — restart the app to show/hide the X section" if restart else ""))
 
 
@@ -256,16 +302,28 @@ def main():
         return selftest()
     if sys.stderr:  # console window / terminal; absent under pythonw
         logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
-    log.setLevel(logging.INFO)
+    # IMAGESEARCHER_DEBUG=1 also logs every image / thumbnail fetch and tracebacks of handled errors
+    log.setLevel(logging.DEBUG if os.environ.get("IMAGESEARCHER_DEBUG") else logging.INFO)
+
+    def crash(kind, exc, tb):
+        log.critical("unhandled error: %s", "".join(traceback.format_exception(kind, exc, tb)).rstrip())
+    sys.excepthook = crash
+    threading.excepthook = lambda a: crash(a.exc_type, a.exc_value, a.exc_traceback)
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)  # the key fetcher's web view needs it, set before the app exists
     app = QApplication(sys.argv)
     app.setApplicationName("imagesearcher")
     app.setDesktopFileName("imagesearcher")
     core.bridge = core.Bridge()
+    import PySide6
+    log.info("started: Python %s, PySide6 %s, %s %s", platform.python_version(), PySide6.__version__, platform.system(), platform.release())
     w = Main()
     clear_cache(w.conf["download_dir"])  # left over from a crash
     app.aboutToQuit.connect(lambda: (x.STOP.set(), core.shutdown(w.conf)))  # STOP wakes X requests waiting their turn
-    log.info("started")
+    c = w.conf
+    log.info("config %s, downloads %s, history %s", core.CONF_PATH, c["download_dir"], f"on ({HISTORY_DIR})" if c["history"] else "off")
+    log.info("boorus on: %s; pixiv: %s; x: %s", ", ".join(b["name"] for b in c["boorus"] if b["on"]) or "none",
+             "token set" if c["pixiv"]["refresh_token"] else "no token",
+             "off" if not c["x"]["enabled"] else f"on, missing {', '.join(x_missing(c))}" if x_missing(c) else "on, set up")
     w.show()
     if w.conf["keys_prompt"] and missing(w.conf):  # offered on every launch while a key is empty, unless switched off
         QTimer.singleShot(0, lambda: KeysDialog(w).show())

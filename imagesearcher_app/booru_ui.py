@@ -56,7 +56,8 @@ class BooruSection(Section):
             save_conf(self.conf)
             self.reload_sites()
             self.tags_tab.reload_sites()
-            log.info("sites: %s", ", ".join(s["id"] for s in self.conf["boorus"]))
+            log.info("sites: %s", "; ".join(f"{s['id']} ({s['engine']}, {'on' if s['on'] else 'off'}"
+                                            f"{', login set' if s['login'] else ''}{', key set' if s['key'] else ''})" for s in self.conf["boorus"]))
 
     # --- opening tabs ---
     def search(self, q=None):
@@ -432,7 +433,16 @@ class TagsTab(QWidget):
         self.gen += 1
         self.page, self.done, self.loading = 0, False, False
         self.list.clear()
-        self.more()
+        self.stale = not self.isVisible()  # hidden: load when first shown, not at startup
+        if not self.stale:
+            self.more()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if getattr(self, "stale", False):
+            self.reload()
+        elif not self.done and self.list.verticalScrollBar().maximum() == 0:
+            self.more()
 
     def more(self):
         e = self.engine()
@@ -469,8 +479,11 @@ class TagsTab(QWidget):
         if names and we:  # the Pixiv column, from the wikis
             run(lambda: bridge.pixiv_names(conf, we, names),
                 lambda m, e: gen == self.gen and [it.setText(2, conf["pixiv_map"].get(it.text(0), "")) for it in items])
-        if not self.done and self.list.verticalScrollBar().maximum() == 0:
+        # fill the window, but only while shown: a hidden list's scrollbar always reads empty, and paging on
+        # would crawl the site's whole tag list in the background (it did: 50+ requests in 14 s)
+        if not self.done and self.isVisible() and self.list.verticalScrollBar().maximum() == 0:
             QTimer.singleShot(0, self.more)
+        log.info("tags '%s' page %d: %d rows%s", self.q.text().strip() or "most used", self.page, len(rows), ", end" if self.done else "")
 
     def detail(self, it):
         r = self.cur = it and it.data(0, Qt.UserRole)

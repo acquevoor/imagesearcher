@@ -61,6 +61,8 @@ class Budget:
         with self.lock:
             check()
             t = self.next_ok()
+            if t - self.clock() > 0.5:
+                log.info("x: next request in %.0f s (%d of %d left this hour)", t - self.clock(), self.left(), HOURLY)
             if t > self.clock():
                 self.sleep(t - self.clock())
             if STOP.is_set():
@@ -163,11 +165,21 @@ def request(conf, url):
         body = http(url, headers=headers(conf))
     except urllib.error.HTTPError as e:
         kind, msg = error_kind(e.code, e.read())
+        log.warning("x: request refused: HTTP %s, %s (%s)", e.code, kind, msg)
         raise handle(conf, kind, msg) from None
-    data = json.loads(body)
-    if data.get("errors") and not data.get("data"):
+    except OSError as e:
+        log.warning("x: request failed: %s: %s", type(e).__name__, e)
+        raise RuntimeError(f"X: network error: {e}") from None
+    try:
+        data = json.loads(body)
+    except ValueError:
+        log.warning("x: reply is not JSON (%d bytes): %r", len(body), body[:120])
+        raise RuntimeError("X: unexpected reply (not JSON), see the log") from None
+    if data.get("errors"):
         kind, msg = error_kind(200, body)
-        raise handle(conf, kind, msg)
+        log.warning("x: reply carries errors (%s): %s%s", kind, msg, "" if not data.get("data") else " (partial data kept)")
+        if not data.get("data"):
+            raise handle(conf, kind, msg)
     return data
 
 
@@ -201,6 +213,7 @@ def ops(conf, state):
     if cached.get("ops") and time.time() - cached.get("ts", 0) < 86400:
         return cached["ops"]
     found = {}
+    log.info("x: reading the current query ids from x.com's main.js (once a day)")
     try:
         budget.wait(lambda: check(conf))
         page = http("https://x.com/", headers={"User-Agent": UA, "Cookie": headers(conf)["Cookie"]}).decode(errors="replace")
@@ -208,12 +221,19 @@ def ops(conf, state):
         if m:
             budget.wait(lambda: check(conf))
             found = parse_ops(http(m[0], headers={"User-Agent": UA}).decode(errors="replace"))
+            log.info("x: main.js %s: found %s", m[0].rsplit("/", 1)[-1], ", ".join(f"{op}={o['qid']} ({len(o['features'])} features)"
+                                                                                for op, o in found.items()) or "none of the needed operations")
+        else:
+            log.warning("x: x.com's page (%d bytes) has no main.js link; title: %s", len(page),
+                        (re.search(r"<title>([^<]*)", page) or [None, "?"])[1][:80])
     except Paused:
         raise
     except Exception as e:
-        log.warning("x: reading query ids from main.js failed (%s), using built-in ones", e)
+        log.warning("x: reading query ids from main.js failed (%s: %s)", type(e).__name__, e)
     for op in OPS:
-        found.setdefault(op, {"qid": FALLBACK_QIDS[op], "features": {}, "toggles": {}})
+        if op not in found:
+            log.warning("x: %s: using the built-in query id %s (may be outdated)", op, FALLBACK_QIDS[op])
+            found[op] = {"qid": FALLBACK_QIDS[op], "features": {}, "toggles": {}}
     state["ops"] = {"ts": time.time(), "ops": found}
     save_state(state)
     return found
@@ -231,13 +251,17 @@ def gql(conf, state, op, variables):
         if not m or isinstance(e, Paused):
             raise
         o = state["ops"]["ops"][op]
-        o["features"].update(dict.fromkeys((f.strip() for f in m[1].split(",") if f.strip()), True))
+        names = [f.strip() for f in m[1].split(",") if f.strip()]
+        log.info("x: %s wants feature switches %s; adding them and trying once more", op, ", ".join(names))
+        o["features"].update(dict.fromkeys(names, True))
         save_state(state)
         return gql_once(conf, state, op, variables)
 
 
 def gql_once(conf, state, op, variables):
     o = ops(conf, state)[op]
+    log.info("x: %s %s", op, ", ".join(f"{k}={v}" for k, v in variables.items() if k in ("screen_name", "userId", "count"))
+             + (" (next page)" if variables.get("cursor") else ""))
     url = GQL + f"{o['qid']}/{op}?" + urllib.parse.urlencode({
         "variables": json.dumps(variables, separators=(",", ":")),
         "features": json.dumps(o["features"], separators=(",", ":")),
@@ -349,7 +373,9 @@ def user(conf, state, handle):
     data = gql(conf, state, "UserByScreenName", {"screen_name": handle.lstrip("@"), "withSafetyModeUserFields": True})
     u = next(filter(None, map(user_of, walk(data))), None)
     if not u:
+        log.warning("x: @%s not found (reply had no user)", handle.lstrip("@"))
         raise RuntimeError(f"X: no account @{handle.lstrip('@')}")
+    log.info("x: @%s is account %s (%s)", u["handle"], u["id"], u["name"])
     return u
 
 
@@ -363,6 +389,7 @@ def following(conf, state, uid, limit=None, pages=50, progress=None):
         got, nxt = users(gql(conf, state, "Following", v))
         new = [u for u in got if u["id"] not in {o["id"] for o in out}]
         out += new
+        log.info("x: following of %s: +%d accounts (%d so far)%s", uid, len(new), len(out), "" if nxt else ", no more pages")
         if progress:
             progress(len(out))
         if not new or not nxt or nxt == cursor or (limit and len(out) >= limit):
@@ -376,6 +403,7 @@ def user_tweets(conf, state, uid, handle=""):
     data = gql(conf, state, "UserTweets", {"userId": uid, "count": 40, "includePromotedContent": False,
                                            "withQuickPromoteEligibilityTweetFields": False, "withVoice": True})
     posts, _, newest = tweets(data, by=handle)
+    log.info("x: @%s: %d media posts on the latest page (%d retweets)", handle or uid, len(posts), sum(1 for p in posts if p.get("rt_by")))
     return posts, newest
 
 
@@ -397,6 +425,7 @@ class MediaSource(Source):
             v["cursor"] = self.cursor
         posts, cursor, _ = tweets(gql(self.conf, self.state, "UserMedia", v))
         self.cursor = cursor if posts and cursor != self.cursor else None
+        log.info("x: media of @%s page %d: %d posts%s", self.handle or self.uid, page, len(posts), "" if self.cursor else ", last page")
         return posts
 
 
@@ -431,6 +460,7 @@ def seed(conf, state, refresh=False):
     h = conf["x"]["seed_handle"].lstrip("@").lower()
     if not refresh and state["seed"].get("handle") == h and state["follows"]:
         return state["follows"]
+    log.info("x: reading @%s's following list (ring 1)", h)
     me = user(conf, state, h)
     state["seed"] = {"handle": h, "id": me["id"]}
     state["follows"] = following(conf, state, me["id"])
@@ -459,8 +489,10 @@ def build_ring2(conf, state, progress=lambda done, total: None):
         g.update(counts={}, users={})
     follows = state["follows"]
     exclude = {state["seed"]["id"], *(f["id"] for f in follows)}
+    log.info("x: graph: reading the follows of %d accounts, starting at #%d", len(follows), g["next"] + 1)
     for i in range(g["next"], len(follows)):
         progress(i, len(follows))
+        log.info("x: graph %d/%d: @%s", i + 1, len(follows), follows[i]["handle"])
         try:
             theirs = following(conf, state, follows[i]["id"], limit=RING2_DEPTH, pages=4)
         except Paused:
@@ -489,7 +521,9 @@ def check_batch(conf, state, accounts, ring, n=BATCH, got=lambda posts: None):
     """Check the n least recently checked accounts; new media posts (newer than what each account showed
     before) go to got() as they arrive and into the state's post cache. -> number of new posts."""
     total = 0
-    for a in due(accounts, state["checked"], n):
+    batch = due(accounts, state["checked"], n)
+    log.info("x: ring %d: checking %d of %d accounts (least recently checked first)", ring, len(batch), len(accounts))
+    for a in batch:
         posts, newest = user_tweets(conf, state, a["id"], a["handle"])
         last = int(state["newest"].get(a["id"], 0))
         have = {p["id"] for p in state["posts"]}
@@ -500,6 +534,7 @@ def check_batch(conf, state, accounts, ring, n=BATCH, got=lambda posts: None):
             state["posts"] = sorted(new + state["posts"], key=lambda p: -int(p["id"]))[:KEEP_POSTS]
             save_state(state)
         total += len(new)
+        log.info("x: checked @%s: %d new (of %d on the page)", a["handle"], len(new), len(posts))
         if new:
             got(new)
     log.info("x: checked %d ring-%d accounts, %d new", min(n, len(accounts)), ring, total)

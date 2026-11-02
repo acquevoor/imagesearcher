@@ -130,6 +130,7 @@ class Feed(QWidget):
 
     def start(self, srcs, label=None):
         self.srcs, self.label = list(srcs), self.label if label is None else label
+        log.info("feed '%s': start from %s", self.label, ", ".join(s.label for s in self.srcs) or "nothing")
         self.gen += 1
         self.page, self.loading, self.errs, self.seen, self.active = 0, False, {}, {}, list(self.srcs)
         self.grid.restart()
@@ -163,10 +164,12 @@ class Feed(QWidget):
                 log.warning(e)
         self.errs.update(errs)  # sticky: a source that failed on page 1 stays explained
         self.active = [s for s in self.active if lists[s]]  # drop exhausted/broken sources from paging
-        bl = set(self.main.conf["blacklist"])
+        bl, hidden, before = set(self.main.conf["blacklist"]), 0, self.grid.count()
         for p in interleave(lists.values()):
             if allowed(p, bl) and (not self.keep or self.keep(p)):
                 self.place(p)
+            else:
+                hidden += 1
         counts = "  ".join(f"{s.label}:{len(l)}" for s, l in lists.items())
         msg = f"'{self.label}' page {self.page}: {self.grid.count()} posts ({counts}){self.note}"
         if self.errs:
@@ -174,7 +177,9 @@ class Feed(QWidget):
         if not self.active:
             msg += "  — end of results"
         self.status.setText(msg)
-        log.info("'%s' page %d: %s", self.label, self.page, counts)
+        log.info("feed '%s' page %d: got %s; %d new tiles, %d hidden by blacklist/filters, %d merged as copies%s",
+                 self.label, self.page, counts or "nothing", self.grid.count() - before, hidden,
+                 sum(len(l) for l in lists.values()) - hidden - (self.grid.count() - before), "; end of results" if not self.active else "")
         self.loaded(lists)
         self.fill()
 
@@ -228,13 +233,14 @@ class ImageTabs(QTabWidget):
             v = Viewer(self.section, self, grid, row)
             self.addTab(v, "")
             v.load()
-            log.info("view %s #%s", p["site"], p["id"])
+            log.info("open image tab %s #%s%s", p["site"], p["id"], " (background)" if background else "")
         if not background:
             self.setCurrentWidget(v)
 
     def close_image(self, i):
         if i > 0:
             w = self.widget(i)
+            log.info("close image tab %s #%s", w.p["site"], w.p["id"])
             w.anim.stop()
             self.removeTab(i)
             w.setParent(None)  # freed by Python once pending image downloads let go of it
@@ -363,6 +369,8 @@ class Viewer(QWidget):
 
     def load(self):
         p = self.p
+        log.info("image %s #%s%s %s (%s)", p["site"], p["id"], f" page {self.pg + 1}/{len(p['files'])}" if len(p["files"]) > 1 else "",
+                 "video" if p["video"] else f"{p['w']}x{p['h']}", p["page"])
         i = self.tabs.indexOf(self)
         self.tabs.setTabText(i, f"{LABELS.get(p['site'], p['site'])} {p['id']}")
         self.tabs.setTabToolTip(i, p.get("title") or " ".join(p["tags"][:30]))
@@ -486,6 +494,7 @@ class Viewer(QWidget):
 
     def play_video(self):
         p = self.p
+        log.info("play video %s #%s", p["site"], p["id"])
         url = next((u for u in p["samples"] + p["files"] if Path(urllib.parse.urlparse(u).path).suffix in (".mp4", ".webm")), p["files"][0])
         try:
             subprocess.Popen(["mpv", f"--referrer={PIXIV_REFERER}" if p["site"] == "pixiv" else "--", url])
@@ -570,6 +579,7 @@ class Section(QWidget):
         for f in [w.home, *getattr(w.home, "feeds", [])]:
             if isinstance(f, Feed):
                 f.stop()  # late replies are dropped instead of paging on in the background
+        log.info("close tab %s", w.key)
         self.tabs.removeTab(i)
         del self.dyn[w.key]
         w.setParent(None)  # freed by Python once pending callbacks let go of it

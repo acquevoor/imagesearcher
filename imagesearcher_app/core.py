@@ -145,16 +145,48 @@ def set_history(on):
 
 # ---------- network ----------
 
+SECRET_PARAM = re.compile(r"key|token|pass|secret|auth|ct0|login|user_id|code", re.I)
+MEDIA_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp", ".mp4", ".webm", ".zip", ".m4v"}
+
+
+def redact(url):
+    """URL for the log: secret-looking query values masked, long queries cut."""
+    u = urllib.parse.urlsplit(url)
+    q = "&".join(f"{k}=***" if SECRET_PARAM.search(k) else f"{k}={v[:60]}" for k, v in urllib.parse.parse_qsl(u.query, keep_blank_values=True))
+    return f"{u.netloc}{u.path}" + (f"?{q[:240]}" if q else "")
+
+
+def net_level(url):
+    """Images, thumbnails, videos and autocomplete: DEBUG (hundreds per page); every API call: INFO."""
+    path = urllib.parse.urlsplit(url).path.lower()
+    return logging.DEBUG if Path(path).suffix in MEDIA_EXT or "autocomplete" in path or "pbs.twimg.com" in url else logging.INFO
+
+
 def open_url(url, data=None, headers=None, timeout=30):
+    """Every request goes through here and is logged: method, URL (secrets masked), status and time.
+    Bodies of POSTs are never logged (they carry tokens)."""
     h = {"User-Agent": UA, **(headers or {})}
     if "pximg.net" in url:
         h["Referer"] = PIXIV_REFERER
-    return urllib.request.urlopen(urllib.request.Request(url, data=data, headers=h), timeout=timeout)
+    method, t0, lvl = "POST" if data else "GET", time.monotonic(), net_level(url)
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(url, data=data, headers=h), timeout=timeout)
+    except urllib.error.HTTPError as e:
+        log.warning("%s %s -> HTTP %s %s (%d ms)", method, redact(url), e.code, e.reason, (time.monotonic() - t0) * 1000)
+        raise
+    except Exception as e:
+        log.warning("%s %s -> failed: %s: %s (%d ms)", method, redact(url), type(e).__name__, e, (time.monotonic() - t0) * 1000)
+        raise
+    log.log(lvl, "%s %s -> %s (%d ms)", method, redact(url), r.status, (time.monotonic() - t0) * 1000)
+    return r
 
 
 def http(url, **kw):
     with open_url(url, **kw) as r:
-        return r.read()
+        data = r.read()
+    if net_level(url) == logging.INFO:
+        log.debug("  %d bytes from %s", len(data), urllib.parse.urlsplit(url).netloc)
+    return data
 
 
 def get_json(url, label, hint="", **kw):
@@ -295,6 +327,7 @@ def fetch_file(url, path):
         with open_url(url, timeout=120) as r, open(tmp, "wb") as f:
             shutil.copyfileobj(r, f)
         os.replace(tmp, path)
+        log.info("saved %s (%.0f kB) to %s/", path.name, path.stat().st_size / 1024, path.parent.name)
     return path
 
 
@@ -369,6 +402,8 @@ def run(fn, cb, pool="net"):
             res, err = fn(), None
         except Exception as e:
             res, err = None, e
+            log.warning("background task (%s pool) failed: %s: %s", pool, type(e).__name__, e)
+            log.debug("traceback", exc_info=e)
         bridge.done.emit(cb, res, err)
     POOLS[pool].submit(job)
 

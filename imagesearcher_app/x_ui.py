@@ -19,7 +19,11 @@ class XSection(Section):
 
     def __init__(self, main):
         super().__init__(main, "@handle   Enter = open that account's media tab")
-        self.state, self.job, self.graph_note = x.load_state(), "", ""
+        self.state, self.job, self.graph_note, self.last_state = x.load_state(), "", "", ""
+        st = self.state
+        log.info("x: state loaded: %d follows, ring 2 = %d accounts%s, %d cached posts, %d accounts checked before",
+                 len(st["follows"]), len(st["graph"]["ring2"]), f" (graph paused at {st['graph']['next']})" if st["graph"]["next"] else "",
+                 len(st["posts"]), len(st["checked"]))
         self.bar.addWidget(self.q, 1)
         for w in (QPushButton("Open", clicked=lambda: self.search()), self.saved, self.star):
             self.bar.addWidget(w)
@@ -49,25 +53,34 @@ class XSection(Section):
             text = f"X: {x.budget.left()} of {x.HOURLY} requests left this hour" + (f" · {self.job}" if self.job else " · idle")
         if self.graph_note:
             text += f" · {self.graph_note}"
+        kind = "not set up" if not x.ready(self.conf) else why or (self.job or "idle")
+        if kind != self.last_state:  # the banner's meaning changed (not just the request counter)
+            log.info("x: status: %s", text)
+            self.last_state = kind
         self.banner.setText(text)
         self.resume_btn.setVisible(bool(why))
 
     def start_job(self, name, fn, done):
         """Run fn() on the single X worker; refuse while another X job runs."""
         if self.job:
+            log.info("x: not starting '%s': busy with '%s'", name, self.job)
             self.main.statusBar().showMessage(f"X is busy: {self.job}")
             return False
         try:
             x.check(self.conf)
         except RuntimeError as e:
+            log.warning("x: not starting '%s': %s", name, e)
             self.main.statusBar().showMessage(str(e))
             self.update_banner()
             return False
+        log.info("x: job started: %s", name)
+        t0 = time.time()
         self.job = name
         self.update_banner()
 
         def finished(res, err):
             self.job = ""
+            log.info("x: job %s: %s (%.0f s)", "failed" if err else "done", name, time.time() - t0)
             if err:
                 log.warning("x: %s: %s", name, err)
                 self.main.statusBar().showMessage(str(err))
@@ -90,6 +103,7 @@ class XSection(Section):
         """Media tab of an account; a bare @handle is looked up first (one request)."""
         self.main.show_section(self)
         key = f"user:{(uid or handle).lower()}"
+        log.info("x: open account tab @%s%s", handle, f" (id {uid})" if uid else "")
         known = uid or next((a["id"] for a in self.state["follows"] + self.state["graph"]["ring2"]
                              if a["handle"].lower() == handle.lower()), "")
 
@@ -171,12 +185,17 @@ class Ring(QWidget):
             self.started = True
             self.show_cached()
             if self.accounts() or self.ring == 1:
+                log.info("x: %s opened for the first time this session: one automatic check", self.label)
                 self.check()
+            else:
+                log.info("x: %s: no accounts yet (graph not built), nothing checked", self.label)
 
     def show_cached(self):
         bl = set(self.section.conf["blacklist"])
         self.grid.restart()
-        self.grid.add([p for p in self.section.state["posts"] if p.get("ring") == self.ring and allowed(p, bl)])
+        mine = [p for p in self.section.state["posts"] if p.get("ring") == self.ring]
+        self.grid.add([p for p in mine if allowed(p, bl)])
+        log.info("x: %s: showing %d cached posts (%d hidden by blacklist)", self.label, self.grid.count(), len(mine) - self.grid.count())
         self.refresh()
 
     def refresh(self):

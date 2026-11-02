@@ -122,6 +122,8 @@ class LoginView(QDialog):
         if self.finished_ or self.busy:
             return
         creds = parse_creds(html)
+        log.info("keys: %s page loaded: %s", TARGETS[self.sid], "API key found" if creds else
+                 "options page without a key" if "s=options" in url else "logged in" if "page=account" in url and "s=login" not in url else "login page")
         if creds:
             self.busy = True
             self.status.setText("Found the API key, checking it…")
@@ -133,6 +135,7 @@ class LoginView(QDialog):
 
     def verified(self, creds, err):
         self.busy = False
+        log.info("keys: %s key check %s", TARGETS[self.sid], f"failed: {err}" if err else "passed")
         if err:
             return self.status.setText(f"{TARGETS[self.sid]} refused the key it showed: {err}")
         self.finish(creds)
@@ -141,6 +144,7 @@ class LoginView(QDialog):
     def exchange(self, url):
         if self.busy or self.finished_:
             return
+        log.info("keys: Pixiv login redirect caught, exchanging the code")
         self.busy, self.callback = True, None
         self.status.setText("Logging in…")
         verifier = self.verifier
@@ -148,6 +152,7 @@ class LoginView(QDialog):
 
     def exchanged(self, token, err):
         self.busy = False
+        log.info("keys: Pixiv code exchange %s", f"failed: {err}" if err else "worked")
         if err:
             return self.status.setText(f"{err}. Reload the page and log in again.")
         self.finish(token)
@@ -196,6 +201,7 @@ class KeysDialog(QDialog):
             btn.setText("Fetch…" if sid in gone else "Fetch again…")
 
     def fetch(self, sid):
+        log.info("keys: fetching %s (%s)", TARGETS[sid], "built-in login window" if web() else "system browser + paste")
         if web():
             v = LoginView(self, sid)
             v.got.connect(lambda value: self.fetched(sid, value))
@@ -205,6 +211,7 @@ class KeysDialog(QDialog):
 
     def paste(self, sid):
         """No QtWebEngine in this PySide6: the system browser + one paste instead."""
+        log.info("keys: %s via the system browser", TARGETS[sid])
         if sid == "pixiv":
             verifier, url = pixiv.login_start()
             webbrowser.open(url)
@@ -222,6 +229,7 @@ class KeysDialog(QDialog):
 
     def result(self, sid, value, err):
         if err:
+            log.warning("keys: %s failed: %s", TARGETS[sid], err)
             return self.rows[sid][0].setText(f"<i>{err}</i>")
         self.fetched(sid, value)
 

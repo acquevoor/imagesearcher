@@ -13,7 +13,7 @@ import zipfile
 
 from PySide6.QtGui import QImage
 
-from .core import Source, dest, get_json, http, make_post, qs, save_conf
+from .core import Source, dest, get_json, http, log, make_post, qs, save_conf
 
 UA = "PixivAndroidApp/5.0.234 (Android 11; Pixel 5)"
 CLIENT = ("MOBrBDS8blbauoSck0ZfDbtuzpyT", "lsACyCD94FhDUtGTXi3QzcFE2uU1hqtDaKeqrdwj")
@@ -40,6 +40,7 @@ def headers(conf):
             c = conf["pixiv"]
             if not c["refresh_token"]:
                 raise RuntimeError(NO_TOKEN)
+            log.info("pixiv: refreshing the access token")
             t = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
             data = qs(client_id=CLIENT[0], client_secret=CLIENT[1], grant_type="refresh_token",
                       refresh_token=c["refresh_token"], include_policy="true").encode()
@@ -51,6 +52,8 @@ def headers(conf):
                 raise RuntimeError(f"Pixiv login failed (HTTP {e.code}): the refresh token is wrong or expired") from None
             _auth["token"], _auth["exp"] = r["access_token"], time.time() + r.get("expires_in", 3600) - 60
             user = r.get("user") or {}
+            log.info("pixiv: logged in as %s (id %s, premium %s), token valid %d min", user.get("account", "?"), user.get("id", "?"),
+                     bool(user.get("is_premium")), r.get("expires_in", 3600) // 60)
             changed = (r.get("refresh_token") or c["refresh_token"], str(user.get("id", c["user_id"])), bool(user.get("is_premium")))
             if changed != (c["refresh_token"], c["user_id"], c["premium"]):
                 c["refresh_token"], c["user_id"], c["premium"] = changed
@@ -75,6 +78,7 @@ def login_code(text):
 
 def login_finish(verifier, code):
     """Trade the code (valid for about a minute) for a refresh token."""
+    log.info("pixiv: trading the login code for a refresh token")
     data = qs(client_id=CLIENT[0], client_secret=CLIENT[1], code=code, code_verifier=verifier, grant_type="authorization_code",
               include_policy="true", redirect_uri=LOGIN_REDIRECT).encode()
     try:
