@@ -1,4 +1,4 @@
-"""The window: a Boorus | Pixiv switch over the two sections, plus what they share (favorites, downloads, settings)."""
+"""The window: a Boorus | Pixiv (| X, opt-in) switch over the sections, plus what they share (favorites, downloads, settings)."""
 import logging
 import sys
 import threading
@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from . import core, pixiv
+from . import core, pixiv, x
 from .booru_ui import BooruSection
 from .keys import KeysDialog, missing
 from .core import (
@@ -19,6 +19,7 @@ from .core import (
     same, save_conf, set_history, to_ui,
 )
 from .pixiv_ui import PixivSection
+from .x_ui import XSection
 
 
 class Settings(QDialog):
@@ -46,6 +47,24 @@ class Settings(QDialog):
         self.limit = QSpinBox(minimum=10, maximum=100, value=c["limit"])
         form.addRow("Booru posts per page", self.limit)
         form.addRow(QLabel("Gelbooru / Rule34 / Pixiv keys: Fetch keys…   Other sites' logins and keys: Boorus → Sites…", wordWrap=True))
+        # X: opt-in, off by default
+        xc = c["x"]
+        self.x_on = QCheckBox("Enable the X section (restart to show/hide it)", checked=xc["enabled"])
+        form.addRow(QLabel("<b>X</b> — read-only, very slow on purpose. Use an <b>alt</b> account: reading X this way is against "
+                           "X's terms and can get that account locked. See the README (“X (opt-in)”) for the cookies.", wordWrap=True))
+        form.addRow(self.x_on)
+        self.x_token = QLineEdit(xc["auth_token"], echoMode=QLineEdit.PasswordEchoOnEdit, placeholderText="alt account's auth_token cookie")
+        self.x_ct0 = QLineEdit(xc["ct0"], echoMode=QLineEdit.PasswordEchoOnEdit, placeholderText="alt account's ct0 cookie")
+        self.x_seed = QLineEdit(xc["seed_handle"], placeholderText="@your_main (its following list must be public)")
+        self.x_pause = QSpinBox(minimum=15, maximum=x.MAX_PAUSE_MIN, singleStep=15, suffix=" min", value=xc["pause_min"])
+        self.x_rand = QCheckBox("randomize (±25%)", checked=xc["pause_random"])
+        form.addRow("X auth_token", self.x_token)
+        form.addRow("X ct0", self.x_ct0)
+        form.addRow("Main account", self.x_seed)
+        row = QHBoxLayout()
+        row.addWidget(self.x_pause)
+        row.addWidget(self.x_rand)
+        form.addRow("Pause X on a warning for", row)
         form.addRow(QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, accepted=self.accept, rejected=self.reject))
 
     def fetch_keys(self):
@@ -60,6 +79,8 @@ class Settings(QDialog):
             pixiv.logout()
         conf["blacklist"] = sorted(set(self.bl.toPlainText().lower().split()))
         conf["download_dir"], conf["limit"] = self.dir.text().strip(), self.limit.value()
+        conf["x"].update(enabled=self.x_on.isChecked(), auth_token=self.x_token.text().strip(), ct0=self.x_ct0.text().strip(),
+                         seed_handle=self.x_seed.text().strip().lstrip("@"), pause_min=self.x_pause.value(), pause_random=self.x_rand.isChecked())
 
 
 class Main(QMainWindow):
@@ -73,7 +94,9 @@ class Main(QMainWindow):
         top = QHBoxLayout()
         self.stack = QStackedWidget()
         self.boorus, self.pixiv = BooruSection(self), PixivSection(self)
-        for i, (sec, name, key) in enumerate(((self.boorus, "Boorus", "Ctrl+1"), (self.pixiv, "Pixiv", "Ctrl+2"))):
+        self.x = XSection(self) if self.conf["x"]["enabled"] else None
+        secs = [(self.boorus, "Boorus", "Ctrl+1"), (self.pixiv, "Pixiv", "Ctrl+2")] + ([(self.x, "X", "Ctrl+3")] if self.x else [])
+        for i, (sec, name, key) in enumerate(secs):
             b = QPushButton(f"{name}", checkable=True, toolTip=key, minimumWidth=110)
             self.switch.addButton(b, i)
             top.addWidget(b)
@@ -96,12 +119,12 @@ class Main(QMainWindow):
         self.cancel_btn = QPushButton("Cancel download", clicked=lambda: self.cancel and self.cancel.set())
         self.cancel_btn.hide()
         self.statusBar().addPermanentWidget(self.cancel_btn)
-        self.show_section(self.pixiv if self.conf["section"] == "pixiv" else self.boorus)
+        self.show_section({"pixiv": self.pixiv, "x": self.x}.get(self.conf["section"]) or self.boorus)
 
     def show_section(self, sec):
         self.stack.setCurrentWidget(sec)
         self.switch.button(self.stack.indexOf(sec)).setChecked(True)
-        self.conf["section"] = "pixiv" if sec is self.pixiv else "boorus"
+        self.conf["section"] = "pixiv" if sec is self.pixiv else "x" if sec is self.x else "boorus"
 
     # --- shared by both sections ---
     def toggle_history(self, on):
@@ -126,7 +149,9 @@ class Main(QMainWindow):
             favs.insert(0, p)
             log.info("favorite %s #%s", p["site"], p["id"])
         save_conf(self.conf)
-        (self.pixiv if p["site"] == "pixiv" else self.boorus).refresh_favs()  # open image tabs keep their own post
+        sec = {"pixiv": self.pixiv, "x": self.x}.get(p["site"], self.boorus)
+        if sec:  # open image tabs keep their own post
+            sec.refresh_favs()
         root, fav = self.conf["download_dir"], self.is_fav(p)
         run(lambda: move_favorite(root, p, fav), lambda r, e: e and self.statusBar().showMessage(f"favorites folder: {e}"), "fav")
 
@@ -221,7 +246,8 @@ class Main(QMainWindow):
             save_conf(self.conf)
             self.boorus.reload_sites()  # posts-per-page lives in the engines
             log.info("settings saved")
-            self.statusBar().showMessage("Settings saved")
+            restart = self.conf["x"]["enabled"] != bool(self.x)
+            self.statusBar().showMessage("Settings saved" + ("  — restart the app to show/hide the X section" if restart else ""))
 
 
 def main():
@@ -238,7 +264,7 @@ def main():
     core.bridge = core.Bridge()
     w = Main()
     clear_cache(w.conf["download_dir"])  # left over from a crash
-    app.aboutToQuit.connect(lambda: core.shutdown(w.conf))
+    app.aboutToQuit.connect(lambda: (x.STOP.set(), core.shutdown(w.conf)))  # STOP wakes X requests waiting their turn
     log.info("started")
     w.show()
     if w.conf["keys_prompt"] and missing(w.conf):  # offered on every launch while a key is empty, unless switched off

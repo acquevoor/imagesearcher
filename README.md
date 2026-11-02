@@ -81,6 +81,22 @@ Includes a desktop entry. Without Nix: `python imagesearcher.py` with PySide6 in
 - The local ♥ Favorite (files on disk) is separate from the Pixiv bookmark.
 - A Pixiv tag's right-click menu has **Open on boorus**: the booru tag whose wiki lists that Japanese name.
 
+## X (opt-in)
+Off by default; switch it on in ⚙ (then restart). It's read-only and slow on purpose.
+
+> **Use a separate (alt) account.** Reading X this way goes through the same internal API x.com itself uses,
+> which is against X's terms. Too much of it can get the account rate-limited or locked. The app never posts,
+> follows, likes or bookmarks anything.
+
+- **Timeline** shows images, GIFs and videos (own posts and retweets) from the accounts your **main** account follows. The alt reads your main's following list, so the alt follows no one and your main never logs in here. Your main's following list must be public.
+- **Discover** shows the accounts that at least 3 of your follows follow, up to 150 of them, best first. **Build graph** reads the first 400 follows of each of your follows. That takes hours at the safe pace, can be paused and resumed, and runs at most once a week.
+- **@handle** in the search box opens that account's media tab.
+- **Pace**: one request at a time, about 15–25 s apart, at most 150 an hour. Each refresh checks the 40 accounts that were checked longest ago.
+- **Warnings**: a rate-limit reply pauses all X traffic for the time set in ⚙ (randomized, up to 6 h). A "locked" or "suspended" reply pauses it until you press **Resume X**.
+- **Sensitive media** gets `rating:e`, so blacklist `rating:e` to hide it. Turn on "Display media that may contain sensitive content" in the alt's X settings.
+
+**Cookies:** log the alt in on x.com in your browser. In Firefox, press F12 → Storage → Cookies → https://x.com; in Chrome, F12 → Application → Cookies. Copy the values of `auth_token` and `ct0` into ⚙, along with your main's @handle. Logging out of x.com in that browser ends the session, so copy fresh cookies after that. They're stored only in your config file (mode 0600) and never logged.
+
 ## Everything else
 
 - ⬇ Bulk downloads everything in the current tab to `{download dir}/{site}/{tab}/` and skips files you already have.

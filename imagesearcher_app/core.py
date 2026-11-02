@@ -54,6 +54,10 @@ DEFAULTS = {
     "keys_prompt": True,  # offer the key fetcher on launch while Gelbooru / Rule34 / Pixiv keys are missing
     "follows": {},  # "tag:x" / "artist:x" -> {booru site id: last seen post id}
     "pixiv_map": {},  # booru tag -> Pixiv tag from its wiki ("" = none known)
+    # X: opt-in, an alt account's session cookies; pauses set by x.pause_for. Graph + post cache live in x_state.json
+    "x": {"enabled": False, "auth_token": "", "ct0": "", "seed_handle": "", "pause_min": 120, "pause_random": True,
+          "paused_until": 0, "locked": False, "reason": ""},
+    "x_saved": [],
 }
 CONF_LOCK = threading.RLock()  # workers add to pixiv_map / refresh the Pixiv token while the UI saves
 
@@ -178,8 +182,8 @@ def qs(**params):
 
 
 # ---------- posts ----------
-LABELS = {"pixiv": "PX"}  # site id -> short tile label, filled from the booru registry
-NAMES = {"pixiv": "Pixiv"}
+LABELS = {"pixiv": "PX", "x": "X"}  # site id -> short tile label, filled from the booru registry
+NAMES = {"pixiv": "Pixiv", "x": "X"}
 
 
 def make_post(site, pid, thumb, files, samples, tags, rating, page, w=0, h=0, **extra):
@@ -353,7 +357,8 @@ class Bridge(QObject):
 
 
 POOLS = {"net": ThreadPoolExecutor(4), "thumb": ThreadPoolExecutor(8), "view": ThreadPoolExecutor(4),  # view: sample + original
-         "fav": ThreadPoolExecutor(1)}  # favorite file moves: one at a time, in click order
+         "fav": ThreadPoolExecutor(1),  # favorite file moves: one at a time, in click order
+         "x": ThreadPoolExecutor(1)}  # X jobs (timeline checks, graph build): one at a time
 bridge = None  # set by app.main once the QApplication exists
 
 

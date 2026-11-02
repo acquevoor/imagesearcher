@@ -5,7 +5,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import boorus, bridge, core, keys, pixiv
+from . import boorus, bridge, core, keys, pixiv, x
 from .booru_ui import follow_srcs
 from .core import CACHE_MARK, cached, clear_cache, dest, fold, interleave, local, move_favorite, preset, rating_ok, allowed
 
@@ -209,4 +209,122 @@ def selftest():
         core.log.info("not saved")
         lines = (Path(tmp) / f"{time.strftime('%Y-%m-%d')}.txt").read_text().splitlines()
         assert [ln.split(" ", 2)[2] for ln in lines] == ["one", "two"], lines  # same day appends, toggle off stops
+    xtest()
     print("selftest ok")
+
+
+def xtest():
+    """X: reply walking (photos, video, retweet, quoted, visibility wrapper, cursors), main.js query ids, error
+    classes, the budget with a fake clock, pause bounds, ring-2 ranking, rotation and a batch check."""
+    def user(uid, handle):
+        return {"__typename": "User", "rest_id": uid, "core": {"screen_name": handle, "name": handle.title()}, "legacy": {}}
+
+    def tweet(tid, uid, handle, media=(), rt=None, quoted=None, sensitive=False, wrap=False):
+        lg = {"id_str": tid, "full_text": "hi #art https://t.co/abc", "possibly_sensitive": sensitive,
+              "entities": {"hashtags": [{"text": "art"}]}}
+        if media:
+            lg["extended_entities"] = {"media": list(media)}
+        if rt:
+            lg["retweeted_status_result"] = {"result": rt}
+        t = {"__typename": "Tweet", "rest_id": tid, "core": {"user_results": {"result": user(uid, handle)}}, "legacy": lg}
+        if quoted:
+            t["quoted_status_result"] = {"result": quoted}
+        return {"__typename": "TweetWithVisibilityResults", "tweet": t} if wrap else t
+
+    photo = {"type": "photo", "media_url_https": "https://pbs.twimg.com/media/AAA.jpg", "original_info": {"width": 800, "height": 600}}
+    video = {"type": "video", "media_url_https": "https://pbs.twimg.com/ext_tw_video_thumb/1/pu/img/V.jpg",
+             "video_info": {"variants": [{"content_type": "application/x-mpegURL", "url": "m3u8"},
+                                         {"content_type": "video/mp4", "bitrate": 256000, "url": "https://video.twimg.com/lo.mp4?tag=1"},
+                                         {"content_type": "video/mp4", "bitrate": 2176000, "url": "https://video.twimg.com/hi.mp4?tag=1"}]}}
+    entry = lambda t: {"content": {"itemContent": {"itemType": "TimelineTweet", "tweet_results": {"result": t}}}}  # noqa: E731
+    reply = {"data": {"user": {"result": {"timeline": {"timeline": {"instructions": [{"type": "TimelineAddEntries", "entries": [
+        entry(tweet("105", "1", "artist", [photo], sensitive=True)),
+        entry(tweet("104", "1", "artist", [video], wrap=True)),
+        entry(tweet("103", "1", "artist", rt=tweet("50", "9", "other", [photo]))),  # retweet: credited to the other artist
+        entry(tweet("102", "1", "artist", quoted=tweet("40", "8", "quoted", [photo]))),  # text-only quote: nothing
+        entry(tweet("101", "1", "artist")),  # text only
+        {"content": {"cursorType": "Bottom", "value": "CUR2"}}]}]}}}}}}
+    posts, cursor, newest = x.tweets(reply, by="artist")
+    assert [p["id"] for p in posts] == ["105", "104", "50"] and cursor == "CUR2" and newest == 105, (posts, cursor, newest)
+    p, v, rt = posts
+    assert p["files"] == ["https://pbs.twimg.com/media/AAA.jpg?name=orig"] and p["samples"] == ["https://pbs.twimg.com/media/AAA.jpg?name=large"]
+    assert p["rating"] == "e" and p["tags"] == ["art", "user:artist"] and p["title"] == "hi #art" and (p["w"], p["h"]) == (800, 600)
+    assert p["page"] == "https://x.com/artist/status/105" and dest("/d", p, 0, "x").name == "x_105.jpg"
+    assert v["video"] and v["files"] == ["https://video.twimg.com/hi.mp4?tag=1"] and v["rating"] == "g"
+    assert rt["handle"] == "other" and rt["rt_by"] == "artist" and not p.get("rt_by")
+
+    fol = {"data": {"user": {"result": {"timeline": {"timeline": {"instructions": [{"entries": [
+        {"content": {"itemContent": {"itemType": "TimelineUser", "user_results": {"result": user("7", "seven")}}}},
+        {"content": {"itemContent": {"itemType": "TimelineUser", "user_results": {"result": user("8", "eight")}}}},
+        {"content": {"cursorType": "Top", "value": "TOP"}}, {"content": {"cursorType": "Bottom", "value": "B1"}}]}]}}}}}}
+    us, cur = x.users(fol)
+    assert [u["handle"] for u in us] == ["seven", "eight"] and cur == "B1"
+
+    js = ('e.exports={queryId:"q1",operationName:"UserMedia",operationType:"query",metadata:{featureSwitches:["f_a","f_b"],'
+          'fieldToggles:["t_a"]}};e.exports={queryId:"q2",operationName:"Following",operationType:"query",metadata:'
+          '{featureSwitches:["f_c"]}};e.exports={queryId:"q3",operationName:"CreateTweet",operationType:"mutation",metadata:{featureSwitches:[]}}')
+    o = x.parse_ops(js)
+    assert set(o) == {"UserMedia", "Following"} and o["UserMedia"] == {"qid": "q1", "features": {"f_a": True, "f_b": True}, "toggles": {"t_a": False}}
+    assert o["Following"]["toggles"] == {}
+
+    assert x.error_kind(429, b"")[0] == "pause"
+    assert x.error_kind(403, b'{"errors":[{"code":326,"message":"account is temporarily locked"}]}')[0] == "lock"
+    assert x.error_kind(200, b'{"errors":[{"code":88,"message":"Rate limit exceeded"}]}')[0] == "pause"
+    assert x.error_kind(401, b"")[0] == "auth" and x.error_kind(404, b"")[0] == "txid"
+    assert x.error_kind(400, b'{"errors":[{"code":336,"message":"The following features cannot be null: a, b"}]}') == \
+        ("other", "The following features cannot be null: a, b")
+
+    now = [1000.0]
+    slept = []
+    b = x.Budget(clock=lambda: now[0], sleep=lambda s: (slept.append(s), now.__setitem__(0, now[0] + s)), rand=lambda: 0.5)
+    for _ in range(x.HOURLY):
+        b.wait()
+    assert slept[0] == x.GAP + x.JITTER / 2 or b.stamps[0] == 1000.0  # first one goes at once
+    assert all(abs(s - (x.GAP + x.JITTER / 2)) < 1e-9 for s in slept) and b.left() == 0
+    first = b.stamps[0]
+    b.wait()  # 151st within the hour waits for the oldest to age out
+    assert now[0] >= first + 3600, (now[0], first)
+
+    conf = {"x": {**core.DEFAULTS["x"], "pause_min": 9999, "pause_random": True}}
+    assert x.pause_minutes(conf, rand=lambda: 1.0) == x.MAX_PAUSE_MIN
+    conf["x"]["pause_min"] = 120
+    assert x.pause_minutes(conf, rand=lambda: 0.0) == 90 and x.pause_minutes(conf, rand=lambda: 1.0) == 150
+    conf["x"]["pause_random"] = False
+    assert x.pause_minutes(conf) == 120
+    saved, x.save_conf = x.save_conf, lambda c: None
+    try:
+        x.pause_for(conf, "429")
+        assert 0 < conf["x"]["paused_until"] - time.time() <= 120 * 60 + 1 and "paused until" in x.paused(conf)
+        x.pause_for(conf, "locked", locked=True)
+        assert conf["x"]["locked"] and "Resume" in x.paused(conf)
+        conf["x"].update(enabled=True, auth_token="a", ct0="c", seed_handle="me")
+        try:
+            x.check(conf)
+            raise AssertionError("check() must refuse while paused")
+        except x.Paused:
+            pass
+        x.resume(conf)
+        x.check(conf)
+    finally:
+        x.save_conf = saved
+
+    counts = {"a": 5, "b": 3, "c": 2, "me": 9, "f1": 7, "d": 3}
+    users_ = {k: {"id": k, "handle": k, "name": k} for k in counts}
+    r2 = x.rank_ring2(counts, users_, exclude={"me", "f1"}, top=2)
+    assert [(u["id"], u["n"]) for u in r2] == [("a", 5), ("b", 3)]
+    accts = [{"id": i, "handle": i} for i in "abcd"]
+    assert [a["id"] for a in x.due(accts, {"a": 5, "b": 1, "d": 3}, 3)] == ["c", "b", "d"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        orig = x.STATE_PATH, x.user_tweets
+        x.STATE_PATH = Path(tmp) / "x_state.json"
+        x.user_tweets = lambda conf, state, uid, handle="": ([q for q in posts if q["user"] == uid or q.get("rt_by") == handle], 105)
+        try:
+            st = x.load_state()
+            seen = []
+            assert x.check_batch(conf, st, [{"id": "1", "handle": "artist"}], 1, got=seen.extend) == 3
+            assert [q["ring"] for q in st["posts"]] == [1, 1, 1] and st["newest"]["1"] == "105" and len(seen) == 3
+            assert x.check_batch(conf, st, [{"id": "1", "handle": "artist"}], 1) == 0  # nothing new the second time
+            assert x.load_state()["checked"]["1"] and oct(x.STATE_PATH.stat().st_mode)[-3:] == "600"
+        finally:
+            x.STATE_PATH, x.user_tweets = orig
