@@ -78,6 +78,9 @@ class LoginView(QDialog):
         self.resize(1000, 760)
         self.status = QLabel(wordWrap=True)
         self.profile = Profile(self)  # no storage name = off the record: nothing reaches the disk
+        # Pixiv's login bot check rejects the "QtWebEngine/x" marker with a bare サーバーでエラーが発生しました
+        # (server error); without it the UA is the plain Chrome string of the Chromium we actually run.
+        self.profile.setHttpUserAgent(re.sub(r" QtWebEngine/\S+", "", self.profile.httpUserAgent()))
         dlg = self
 
         class Watch(Page):
@@ -100,7 +103,10 @@ class LoginView(QDialog):
         lay.addWidget(self.view, 1)
         if sid == "pixiv":
             self.verifier, url = pixiv.login_start()
-            self.status.setText("Log in to Pixiv (or click Continue). The token is picked up by itself.")
+            self.status.setText("Log in to Pixiv (or click Continue). The token is picked up by itself. "
+                                "Pixiv says “server error” or keeps failing? Use your own browser instead.")
+            own = QPushButton("Use my own browser instead", clicked=lambda: (self.reject(), parent.paste(sid)))
+            lay.addWidget(own)
         else:
             url = f"{preset(sid)['url']}/index.php?page=account&s=login&code=00"
             self.status.setText(f"Log in to {TARGETS[sid]} (solve the CAPTCHA if one shows). The API key is read from your account page by itself.")
