@@ -23,6 +23,7 @@ class IBSection(Section):
     SAVED = "ib_saved"
 
     def __init__(self, main):
+        ib.apply_passes(main.conf)
         super().__init__(main, "search the archives…   Enter = search   (Filters ▾: boards, subject, filename, tripcode)")
         self.filters_btn = QPushButton("Filters ▾", checkable=True)
         self.bar.addWidget(self.q, 1)
@@ -358,6 +359,7 @@ class CloudflarePass(QDialog):
             self.conf["ib"]["cf"][self.host] = {"cookie": text(c.value()), "ua": self.profile.httpUserAgent(),
                                                 "ts": time.time()}
             save_conf(self.conf)
+            ib.apply_passes(self.conf)
             log.info("ib: Cloudflare passed for %s (cookie kept, user agent %s)", self.host, self.profile.httpUserAgent()[:60])
             self.status.setText("Passed. You can close this window.")
             self.accept()

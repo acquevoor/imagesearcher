@@ -16,13 +16,22 @@ from .core import CONF_LOCK, Source, cached, log, make_post, open_url, save_conf
 
 LIVE_API, LIVE_IMG, LIVE_BOARDS = "https://a.4cdn.org", "https://i.4cdn.org", "https://boards.4chan.org"
 ARCHIVES = ["desuarchive.org", "archiveofsins.com", "archived.moe"]  # offered in Settings
+# image servers of the archives: desuarchive's full images sit behind Cloudflare's check (thumbnails don't)
+IMAGE_HOSTS = ["desu-usergeneratedcontent.xyz"]
 NSFW = {"d", "h", "hc", "hm", "e", "u", "aco", "gif", "r", "s", "t", "y", "b", "hr", "soc"}
 CF_MSG = "Cloudflare check on {host}: press ☁ Pass Cloudflare… (Imageboard bar or ⚙) and pick {host}, then try again"
 
 
 def cf_hosts(conf):
     """Archives a Cloudflare pass can be made for: the known ones plus any set in the board mapping."""
-    return list(dict.fromkeys(ARCHIVES + list(conf["ib"]["boards"].values())))
+    return list(dict.fromkeys(ARCHIVES + IMAGE_HOSTS + list(conf["ib"]["boards"].values())))
+
+
+def apply_passes(conf):
+    """Send every Cloudflare pass with all requests to its host (images included), not only API calls."""
+    from . import core
+    for host, cf in conf["ib"]["cf"].items():
+        core.HOST_HEADERS[host] = {"Cookie": f"cf_clearance={cf['cookie']}", "User-Agent": cf["ua"]}
 
 
 def boards(conf):
@@ -86,7 +95,8 @@ def plain(com):
 
 def _post(board, num, thread, file, thumb, filename, md5, comment, subject, w, h, size, page, source, **extra):
     title = (subject or comment.replace("\n", " "))[:200]
-    return make_post("ib", f"{board}-{num}", thumb, [file], [file], [f"/{board}/", f"thread:{board}/{thread}", f"file:{filename}"],
+    # the sample is the thumbnail: it always loads (archive full images may need a Cloudflare pass), the original follows
+    return make_post("ib", f"{board}-{num}", thumb, [file], [thumb], [f"/{board}/", f"thread:{board}/{thread}", f"file:{filename}"],
                      "e" if board in NSFW else "", page, int(w or 0), int(h or 0), board=board, num=str(num), thread=str(thread),
                      filename=filename, comment=comment, subject=subject or "", size=int(size or 0), source=source, md5=md5,
                      title=title, op=str(num) == str(thread), **extra)

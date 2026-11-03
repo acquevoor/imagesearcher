@@ -169,10 +169,16 @@ def net_level(url):
     return logging.DEBUG if Path(path).suffix in MEDIA_EXT or "autocomplete" in path or "pbs.twimg.com" in url else logging.INFO
 
 
+# host -> extra headers for every request to it: a Cloudflare pass you made (cf_clearance + the user agent it was
+# issued to), set by imageboard.apply_passes. Covers image downloads too, not only API calls.
+HOST_HEADERS = {}
+
+
 def open_url(url, data=None, headers=None, timeout=30):
     """Every request goes through here and is logged: method, URL (secrets masked), status and time.
     Bodies of POSTs are never logged (they carry tokens)."""
-    h = {"User-Agent": UA, **(headers or {})}
+    host = urllib.parse.urlsplit(url).hostname or ""
+    h = {"User-Agent": UA, **HOST_HEADERS.get(host, {}), **(headers or {})}
     if "pximg.net" in url:
         h["Referer"] = PIXIV_REFERER
     method, t0, lvl = "POST" if data else "GET", time.monotonic(), net_level(url)
@@ -180,6 +186,11 @@ def open_url(url, data=None, headers=None, timeout=30):
         r = urllib.request.urlopen(urllib.request.Request(url, data=data, headers=h), timeout=timeout)
     except urllib.error.HTTPError as e:
         log.warning("%s %s -> HTTP %s %s (%d ms)", method, redact(url), e.code, e.reason, (time.monotonic() - t0) * 1000)
+        if e.code in (403, 503) and e.headers.get("cf-mitigated") == "challenge":
+            log.warning("%s is behind Cloudflare's browser check%s: Imageboard → ☁ Pass Cloudflare… and pick %s", host,
+                        " (your pass expired)" if host in HOST_HEADERS else "", host)
+            raise urllib.error.HTTPError(url, e.code, f"{host} is behind Cloudflare's browser check: ☁ Pass Cloudflare… → {host}",
+                                         e.headers, None) from None
         raise
     except Exception as e:
         log.warning("%s %s -> failed: %s: %s (%d ms)", method, redact(url), type(e).__name__, e, (time.monotonic() - t0) * 1000)

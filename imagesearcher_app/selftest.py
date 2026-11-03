@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.request
 from pathlib import Path
 
 from . import boorus, bridge, core, imageboard as ib, keys, pawchive as pw, pixiv, x
@@ -501,6 +502,7 @@ def ibtest():
     assert p["id"] == "d-11597785" and p["filename"] == "01.jpg" and p["md5"] == "6fa0cf53afdedf04a5b277366e688b08" and p["op"]
     assert p["tags"] == ["/d/", "thread:d/11597785", "file:01.jpg"] and p["rating"] == "e" and p["size"] == 242560 and (p["w"], p["h"]) == (1280, 1810)
     assert p["page"] == "https://desuarchive.org/d/thread/11597785/#11597785" and p["title"] == "Elf thread" and p["source"] == "desuarchive.org"
+    assert p["samples"] == [p["thumb"]] and p["files"][0].endswith("/image/1793/17/1793172802742.jpg")  # preview = thumbnail
     assert ib.ff_post(ff_text, "h") is None and ib.ff_post(ff_ghost, "h") is None
     live_op = {"no": 11597785, "resto": 0, "sub": "Elf &amp; co", "com": "Elves.<br>Post <span class=\"quote\">&gt;elves</span>.",
                "tim": 1793172802742249, "ext": ".jpg", "filename": "01", "md5": "b6DPU6/e3wSlsnc2bmiLCA==", "fsize": 242560, "w": 1280,
@@ -574,6 +576,26 @@ def ibtest():
                 raise AssertionError("Cloudflare must be explained")
             except RuntimeError as e:
                 assert "Pass Cloudflare" in str(e) and "archived.moe" in str(e)
+            # a pass is sent with every request to its host (image downloads too), and a Cloudflare 403 says what to do
+            conf["ib"]["cf"]["desu-usergeneratedcontent.xyz"] = {"cookie": "IMG", "ua": "UA/2"}
+            ib.apply_passes(conf)
+            seen_req = []
+
+            def fake_urlopen(req, timeout=30):
+                seen_req.append(dict(req.header_items()))
+                raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {"cf-mitigated": "challenge"}, io.BytesIO(b"Just a moment"))
+            orig_uo = urllib.request.urlopen
+            urllib.request.urlopen = fake_urlopen
+            try:
+                core.open_url("https://desu-usergeneratedcontent.xyz/trash/image/1/2/3.png")
+                raise AssertionError("must raise")
+            except urllib.error.HTTPError as e:
+                assert "Pass Cloudflare" in str(e.reason) and "desu-usergeneratedcontent.xyz" in str(e.reason)
+            finally:
+                urllib.request.urlopen = orig_uo
+                core.HOST_HEADERS.clear()
+            assert seen_req[0].get("Cookie") == "cf_clearance=IMG" and seen_req[0].get("User-agent") == "UA/2"
+            assert "desu-usergeneratedcontent.xyz" in ib.cf_hosts(conf)
             conf["ib"]["cf"]["archived.moe"] = {"cookie": "CF", "ua": "UA/1"}
             assert ib.headers(conf, "archived.moe") == {"Cookie": "cf_clearance=CF", "User-Agent": "UA/1"} and ib.headers(conf, "desuarchive.org") == {}
         finally:
