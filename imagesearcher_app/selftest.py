@@ -640,6 +640,9 @@ def pawtest():
     assert p["tags"] == ["$10 Sneak Peeks", "Character Bios", "service:patreon", "creator:patreon/103431"]
     assert p["content"] == "Two new characters" and p["next"] == "174228515" and p["thumb"].startswith("https://img.pawchive.pw/thumbnail/")
     assert pw.parse_post({**post, "file": {}, "attachments": [{"name": "a.zip", "path": "/x/y/a.zip"}]}, conf) is None
+    pending = pw.parse_post({**post, "has_full": False, "preview_state": "pending"}, conf)  # full files not archived yet
+    assert pending["preview"] == 3 and all("/thumbnail/" in u for u in pending["files"])
+    assert pw.jobs(pending) == [] and [n for _, n, _ in pw.jobs(p)] == ["Veronica_OP2.png", "clip.mp4"]  # previews never saved
     assert pw.pg_array(["a"]) == ["a"] and pw.pg_array("{solo,\"two words\"}") == ["solo", "two words"] and pw.sha_of_url(p["files"][0]) == sha_a
 
     card = ('<article class="post-card post-card--preview" data-id="173960633" data-service="patreon" data-user="92168361" >'

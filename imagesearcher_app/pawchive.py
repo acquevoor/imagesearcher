@@ -152,7 +152,9 @@ def parse_post(p, conf):
         (media if ext in MEDIA else other).append(f)
     if not media:
         return None
-    files = [thumb_url(conf, f) if f.get("preview_only") else file_url(conf, f) for f in media]
+    # has_full false (e.g. imported from Kemono, preview_state "pending"): the archive holds only thumbnails so far
+    only_preview = lambda f: bool(f.get("preview_only")) or p.get("has_full") is False  # noqa: E731
+    files = [thumb_url(conf, f) if only_preview(f) else file_url(conf, f) for f in media]
     still = next((f for f in media if Path(f["path"]).suffix.lower() not in (".mp4", ".webm", ".mov", ".m4v")), media[0])
     service, user, pid = p["service"], str(p["user"]), str(p["id"])
     tags = pg_array(p.get("tags")) + [f"service:{service}", f"creator:{service}/{user}"]
@@ -160,7 +162,7 @@ def parse_post(p, conf):
                      f"{site(conf)}/{service}/user/{user}/post/{pid}", service=service, user=user, post_id=pid,
                      title=p.get("title") or "", content=text(p.get("content") or p.get("substring")),
                      published=p.get("published") or "", names=[f.get("name") or Path(f["path"]).name for f in media],
-                     preview=sum(1 for f in media if f.get("preview_only")),
+                     preview=sum(1 for f in media if only_preview(f)),
                      other=[{"name": f.get("name") or Path(f["path"]).name, "url": file_url(conf, f)} for f in other],
                      prev=p.get("prev"), next=p.get("next"), stub=False)
 
@@ -419,8 +421,10 @@ def target(conf, p, root, name, url):
 
 
 def jobs(p, everything=False):
-    """[(page index or None, original name, url)] of what a download of p saves."""
-    out = [(i, p["names"][i] if i < len(p["names"]) else Path(urllib.parse.urlparse(u).path).name, u) for i, u in enumerate(p["files"])]
+    """[(page index or None, original name, url)] of what a download of p saves. Preview-only pages are left out:
+    their thumbnail must not be saved under the original file's name."""
+    out = [(i, p["names"][i] if i < len(p["names"]) else Path(urllib.parse.urlparse(u).path).name, u) for i, u in enumerate(p["files"])
+           if "/thumbnail/" not in u]
     return out + ([(None, o["name"], o["url"]) for o in p.get("other") or []] if everything else [])
 
 
