@@ -409,7 +409,8 @@ class Bridge(QObject):
 
 POOLS = {"net": ThreadPoolExecutor(4), "thumb": ThreadPoolExecutor(8), "view": ThreadPoolExecutor(4),  # view: sample + original
          "fav": ThreadPoolExecutor(1),  # favorite file moves: one at a time, in click order
-         "x": ThreadPoolExecutor(1)}  # X jobs (timeline checks, graph build): one at a time
+         "x": ThreadPoolExecutor(1),  # X timeline / discover checks, one at a time
+         "xgraph": ThreadPoolExecutor(1), "xbulk": ThreadPoolExecutor(1)}  # graph build and bulk run beside them
 bridge = None  # set by app.main once the QApplication exists
 
 

@@ -267,12 +267,11 @@ def xtest():
     us, cur = x.users(fol)
     assert [u["handle"] for u in us] == ["seven", "eight"] and cur == "B1"
 
-    js = ('e.exports={queryId:"q1",operationName:"UserMedia",operationType:"query",metadata:{featureSwitches:["f_a","f_b"],'
-          'fieldToggles:["t_a"]}};e.exports={queryId:"q2",operationName:"Following",operationType:"query",metadata:'
-          '{featureSwitches:["f_c"]}};e.exports={queryId:"q3",operationName:"CreateTweet",operationType:"mutation",metadata:{featureSwitches:[]}}')
-    o = x.parse_ops(js)
-    assert set(o) == {"UserMedia", "Following"} and o["UserMedia"] == {"qid": "q1", "features": {"f_a": True, "f_b": True}, "toggles": {"t_a": False}}
-    assert o["Following"]["toggles"] == {}
+    # built-in query ids + feature switches (user lookup vs timelines), plus switches X asked for
+    o = x.ops({}, {"features_extra": {"UserTweets": {"new_flag": True}}})
+    assert set(o) == set(x.OPS) and all(len(v["qid"]) >= 20 for v in o.values())
+    assert o["UserByScreenName"]["features"] == x.FEATURES_USER and o["UserTweets"]["features"]["new_flag"] is True
+    assert len(x.FEATURES_TIMELINE) > 20 and "new_flag" not in o["UserMedia"]["features"]
 
     assert x.error_kind(429, b"")[0] == "pause"
     assert x.error_kind(403, b'{"errors":[{"code":326,"message":"account is temporarily locked"}]}')[0] == "lock"
@@ -321,6 +320,12 @@ def xtest():
     assert [(u["id"], u["n"]) for u in r2] == [("a", 5), ("b", 3)]
     accts = [{"id": i, "handle": i} for i in "abcd"]
     assert [a["id"] for a in x.due(accts, {"a": 5, "b": 1, "d": 3}, 3)] == ["c", "b", "d"]
+    # Stop: a check stops before the next account, a graph build stops before the next follow and keeps its place
+    stopped = threading.Event()
+    stopped.set()
+    assert x.check_batch({"x": {}}, {"checked": {}, "newest": {}, "posts": []}, accts, 1, cancel=stopped) == 0
+    gs = {"graph": {"next": 2, "counts": {}, "users": {}, "ring2": [], "built": 0}, "follows": accts, "seed": {"id": "me"}}
+    assert x.build_ring2({"x": {}}, gs, cancel=stopped) is None and gs["graph"]["next"] == 2
 
     with tempfile.TemporaryDirectory() as tmp:
         orig = x.STATE_PATH, x.user_tweets

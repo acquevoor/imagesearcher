@@ -21,12 +21,6 @@ BEARER = ("AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0"
 GQL = "https://x.com/i/api/graphql/"
 OPS = ("UserByScreenName", "Following", "Followers", "UserTweets", "UserMedia")
-# Used only when reading the current ones from x.com's main.js fails; X rotates them every few weeks.
-# ponytail: stale fallbacks just fail with a clear error, the main.js read is what keeps this working
-FALLBACK_QIDS = {"UserByScreenName": "x3RLKWW1Tl7JgU7YtGxuzw", "Following": "zx6e-TLzRkeDO_a7p4b3JQ",
-                 "Followers": "oQWxG6XdR5SPvMBsPiKUPQ", "UserTweets": "bbmLh6qwlhCgVTDO4R9ngA",
-                 "UserMedia": "WJhR3BD7MuJyTjd6Qhh6qA"}
-
 PACES = {"jd": "JDownloader (fast)", "careful": "Careful (slow)"}
 JD_GAP, JD_JITTER = 1.0, 0.5  # jd pace: seconds between requests; X's own rate-limit headers do the rest
 JD_429_WAIT = 900  # a 429 without a reset time: wait 15 min
@@ -203,7 +197,7 @@ def error_kind(status, body):
         return "pause", msg
     if status == 401 or codes & {32, 89, 239, 353}:
         return "auth", msg
-    if status == 404 and not errs:  # X answers an unsigned request (missing x-client-transaction-id) with a bare 404
+    if status == 404 and not errs:  # an outdated query id (or a missing x-client-transaction-id) gets a bare 404
         return "txid", msg
     return "other", msg
 
@@ -258,53 +252,76 @@ def handle(conf, kind, msg):
     if kind == "auth":
         return RuntimeError(f"X refused the cookies ({msg}): copy fresh auth_token and ct0 from the alt's browser session")
     if kind == "txid":
-        return RuntimeError("X: request refused (404). X may now require the x-client-transaction-id header, "
-                            "which this version doesn't send yet")
+        return RuntimeError("X refused the request (404): its query id is probably outdated (X rotates them). Update the "
+                            "app (git pull / restart); if that doesn't help, X now wants the x-client-transaction-id header")
     return RuntimeError(f"X: {msg}")
 
 
-QID_RE = re.compile(r'queryId:"([\w-]+)",operationName:"(\w+)",operationType:"\w+",metadata:\{featureSwitches:\[([^\]]*)\]'
-                    r'(?:,fieldToggles:\[([^\]]*)\])?')
-MAIN_JS = re.compile(r"https://abs\.twimg\.com/responsive-web/client-web(?:-legacy)?/main\.\w+\.js")
-
-
-def parse_ops(js):
-    """main.js -> {operation: {"qid", "features": {name: True}, "toggles": {name: False}}} for OPS."""
-    names = lambda s: re.findall(r'"(\w+)"', s)  # noqa: E731
-    return {op: {"qid": qid, "features": dict.fromkeys(names(fs), True), "toggles": dict.fromkeys(names(ft), False)}
-            for qid, op, fs, ft in QID_RE.findall(js) if op in OPS}
+# The web client's GraphQL query ids and feature switches. x.com's front end no longer ships them in a readable main.js
+# (it moved to Relay chunks), so they're kept here, taken from gallery-dl (github.com/mikf/gallery-dl,
+# extractor/twitter.py, 2026-11-03). When X rotates them, requests fail with a 404: update the app (git pull).
+QIDS = {"UserByScreenName": "ck5KkZ8t5cOmoLssopN99Q", "Following": "SaWqzw0TFAWMx1nXWjXoaQ",
+        "Followers": "i6PPdIMm1MO7CpAqjau7sw", "UserTweets": "E8Wq-_jFSaU7hxVcuOPR9g",
+        "UserMedia": "jCRhbOzdgOHp6u9H4g2tEg"}
+FEATURES_USER = {
+    "hidden_profile_subscriptions_enabled": True,
+    "payments_enabled": False,
+    "rweb_xchat_enabled": False,
+    "profile_label_improvements_pcf_label_in_post_enabled": True,
+    "rweb_tipjar_consumption_enabled": True,
+    "verified_phone_label_enabled": False,
+    "highlights_tweets_tab_ui_enabled": True,
+    "responsive_web_twitter_article_notes_tab_enabled": True,
+    "subscriptions_feature_can_gift_premium": True,
+    "creator_subscriptions_tweet_preview_api_enabled": True,
+    "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+    "responsive_web_graphql_timeline_navigation_enabled": True,
+}
+FEATURES_TIMELINE = {
+    "rweb_video_screen_enabled": False,
+    "payments_enabled": False,
+    "rweb_xchat_enabled": False,
+    "profile_label_improvements_pcf_label_in_post_enabled": True,
+    "rweb_tipjar_consumption_enabled": True,
+    "verified_phone_label_enabled": False,
+    "creator_subscriptions_tweet_preview_api_enabled": True,
+    "responsive_web_graphql_timeline_navigation_enabled": True,
+    "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+    "premium_content_api_read_enabled": False,
+    "communities_web_enable_tweet_community_results_fetch": True,
+    "c9s_tweet_anatomy_moderator_badge_enabled": True,
+    "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
+    "responsive_web_grok_analyze_post_followups_enabled": True,
+    "responsive_web_jetfuel_frame": True,
+    "responsive_web_grok_share_attachment_enabled": True,
+    "articles_preview_enabled": True,
+    "responsive_web_edit_tweet_api_enabled": True,
+    "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
+    "view_counts_everywhere_api_enabled": True,
+    "longform_notetweets_consumption_enabled": True,
+    "responsive_web_twitter_article_tweet_consumption_enabled": True,
+    "tweet_awards_web_tipping_enabled": False,
+    "responsive_web_grok_show_grok_translated_post": False,
+    "responsive_web_grok_analysis_button_from_backend": True,
+    "creator_subscriptions_quote_tweet_preview_enabled": False,
+    "freedom_of_speech_not_reach_fetch_enabled": True,
+    "standardized_nudges_misinfo": True,
+    "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
+    "longform_notetweets_rich_text_read_enabled": True,
+    "longform_notetweets_inline_media_enabled": True,
+    "responsive_web_grok_image_annotation_enabled": True,
+    "responsive_web_grok_imagine_annotation_enabled": True,
+    "responsive_web_grok_community_note_auto_translation_is_enabled": False,
+    "responsive_web_enhance_cards_enabled": False,
+}
 
 
 def ops(conf, state):
-    """Current query ids + feature switches, read from x.com's main.js at most once a day (2 budgeted requests)."""
-    cached = state.get("ops") or {}
-    if cached.get("ops") and time.time() - cached.get("ts", 0) < 86400:
-        return cached["ops"]
-    found = {}
-    log.info("x: reading the current query ids from x.com's main.js (once a day)")
-    try:
-        budget.wait(lambda: check(conf), pace(conf), "main.js")
-        page = http("https://x.com/", headers={"User-Agent": UA, "Cookie": headers(conf)["Cookie"]}).decode(errors="replace")
-        m = MAIN_JS.search(page)
-        if m:
-            budget.wait(lambda: check(conf), pace(conf), "main.js")
-            found = parse_ops(http(m[0], headers={"User-Agent": UA}).decode(errors="replace"))
-            log.info("x: main.js %s: found %s", m[0].rsplit("/", 1)[-1], ", ".join(f"{op}={o['qid']} ({len(o['features'])} features)"
-                                                                                for op, o in found.items()) or "none of the needed operations")
-        else:
-            log.warning("x: x.com's page (%d bytes) has no main.js link; title: %s", len(page),
-                        (re.search(r"<title>([^<]*)", page) or [None, "?"])[1][:80])
-    except Paused:
-        raise
-    except Exception as e:
-        log.warning("x: reading query ids from main.js failed (%s: %s)", type(e).__name__, e)
-    for op in OPS:
-        if op not in found:
-            log.warning("x: %s: using the built-in query id %s (may be outdated)", op, FALLBACK_QIDS[op])
-            found[op] = {"qid": FALLBACK_QIDS[op], "features": {}, "toggles": {}}
-    state["ops"] = {"ts": time.time(), "ops": found}
-    save_state(state)
-    return found
+    """Query id + feature switches per operation; switches X asked for (see gql) are remembered in the state."""
+    learned = state.setdefault("features_extra", {})
+    return {op: {"qid": QIDS[op], "toggles": {},
+                 "features": {**(FEATURES_USER if op == "UserByScreenName" else FEATURES_TIMELINE), **learned.get(op, {})}}
+            for op in OPS}
 
 
 NULL_FEATURES = re.compile(r"features cannot be null: ([\w, ]+)")
@@ -314,14 +331,13 @@ def gql(conf, state, op, variables):
     try:
         return gql_once(conf, state, op, variables)
     except RuntimeError as e:
-        # X names the feature switches it wants (likely when main.js couldn't be read): add them, try once more
+        # X names the feature switches it wants (after it adds new ones): add them, try once more
         m = NULL_FEATURES.search(str(e))
         if not m or isinstance(e, Paused):
             raise
-        o = state["ops"]["ops"][op]
         names = [f.strip() for f in m[1].split(",") if f.strip()]
         log.info("x: %s wants feature switches %s; adding them and trying once more", op, ", ".join(names))
-        o["features"].update(dict.fromkeys(names, True))
+        state.setdefault("features_extra", {}).setdefault(op, {}).update(dict.fromkeys(names, True))
         save_state(state)
         return gql_once(conf, state, op, variables)
 
@@ -509,7 +525,7 @@ class MediaSource(Source):
 # ---------- state: x_state.json next to config.json (0600, written atomically) ----------
 
 STATE_DEFAULTS = {"seed": {}, "follows": [], "graph": {"built": 0, "next": 0, "counts": {}, "users": {}, "ring2": []},
-                  "checked": {}, "newest": {}, "posts": [], "ops": {}, "bulk": None}
+                  "checked": {}, "newest": {}, "posts": [], "features_extra": {}, "bulk": None}
 STATE_LOCK = threading.RLock()
 
 
@@ -559,9 +575,9 @@ def graph_due(state, now=None):
     return g["next"] > 0 or (now or time.time()) - g["built"] > REBUILD_DAYS * 86400
 
 
-def build_ring2(conf, state, progress=lambda done, total: None):
+def build_ring2(conf, state, progress=lambda done, total: None, cancel=None):
     """Read the first RING2_DEPTH entries of each follow's following list and rank the overlap.
-    Resumable: after a pause or quit it continues at state["graph"]["next"]."""
+    Resumable: after a pause, quit or Stop (cancel) it continues at state["graph"]["next"]."""
     g = state["graph"]
     if g["next"] == 0:
         follows = seed(conf, state, refresh=True)
@@ -570,6 +586,9 @@ def build_ring2(conf, state, progress=lambda done, total: None):
     exclude = {state["seed"]["id"], conf["x"].get("alt_id", ""), *(f["id"] for f in follows)}
     log.info("x: graph: reading the follows of %d accounts, starting at #%d", len(follows), g["next"] + 1)
     for i in range(g["next"], len(follows)):
+        if cancel and cancel.is_set():
+            log.info("x: graph stopped at %d/%d (Continue graph picks it up)", i, len(follows))
+            return None
         progress(i, len(follows))
         log.info("x: graph %d/%d: @%s", i + 1, len(follows), follows[i]["handle"])
         try:
@@ -596,13 +615,16 @@ def due(accounts, checked, n=BATCH):
     return sorted(accounts, key=lambda a: (checked.get(a["id"], 0), a["id"]))[:n]
 
 
-def check_batch(conf, state, accounts, ring, n=BATCH, got=lambda posts: None):
+def check_batch(conf, state, accounts, ring, n=BATCH, got=lambda posts: None, cancel=None):
     """Check the n least recently checked accounts; new media posts (newer than what each account showed
     before) go to got() as they arrive and into the state's post cache. -> number of new posts."""
     total = 0
     batch = due(accounts, state["checked"], n)
     log.info("x: ring %d: checking %d of %d accounts (least recently checked first)", ring, len(batch), len(accounts))
     for a in batch:
+        if cancel and cancel.is_set():
+            log.info("x: ring %d check stopped", ring)
+            break
         posts, newest = user_tweets(conf, state, a["id"], a["handle"])
         last = int(state["newest"].get(a["id"], 0))
         have = {p["id"] for p in state["posts"]}

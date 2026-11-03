@@ -25,8 +25,8 @@ class XSection(Section):
         super().__init__(main, "@handle   Enter = open that account's media tab")
         if x.fix_pasted_export(self.conf):
             save_conf(self.conf)
-        self.state, self.job, self.graph_note, self.last_state, self.bulk_note = x.load_state(), "", "", "", ""
-        self.bulk_cancel = threading.Event()
+        self.state, self.graph_note, self.last_state, self.bulk_note = x.load_state(), "", "", ""
+        self.jobs, self.cancels = {}, {}  # kind ("check1", "check2", "graph", "bulk") -> running job name / its Stop event
         st = self.state
         log.info("x: state loaded: %d follows, ring 2 = %d accounts%s, %d cached posts, %d accounts checked before",
                  len(st["follows"]), len(st["graph"]["ring2"]), f" (graph paused at {st['graph']['next']})" if st["graph"]["next"] else "",
@@ -56,7 +56,7 @@ class XSection(Section):
         QTimer(self, interval=5000, timeout=self.update_banner).start()
         self.update_banner()
 
-    # --- banner / jobs: one X job at a time (all traffic is serialized by the budget anyway) ---
+    # --- banner / jobs: one job per kind; kinds run side by side (the budget still spaces every request) ---
     def update_banner(self):
         why = x.paused(self.conf)
         if not x.ready(self.conf):
@@ -64,29 +64,40 @@ class XSection(Section):
         elif why:
             text = why
         else:
-            text = f"X: {x.budget.status(x.pace(self.conf))}" + (f" · {self.job}" if self.job else " · idle")
+            text = f"X: {x.budget.status(x.pace(self.conf))} · " + (" · ".join(self.jobs.values()) or "idle")
         for note in (self.graph_note, self.bulk_note):
             if note:
                 text += f" · {note}"
         b = self.state.get("bulk")
         self.paste_btn.setVisible(not x.ready(self.conf))
-        self.cancel_btn.setVisible(self.job.startswith("bulk"))
-        resumable = bool(b and not b["finished"] and not self.job)
+        self.cancel_btn.setVisible("bulk" in self.jobs)
+        resumable = bool(b and not b["finished"] and "bulk" not in self.jobs)
         self.continue_btn.setVisible(resumable)
         if resumable:
             self.continue_btn.setText(f"Continue bulk @{b['handle']} ({b['i']}/{len(b['accounts'])} accounts)")
-        kind = "not set up" if not x.ready(self.conf) else why or (self.job or "idle")
+        kind = "not set up" if not x.ready(self.conf) else why or (", ".join(self.jobs.values()) or "idle")
         if kind != self.last_state:  # the banner's meaning changed (not just the request counter)
             log.info("x: status: %s", text)
             self.last_state = kind
         self.banner.setText(text)
         self.resume_btn.setVisible(bool(why))
 
-    def start_job(self, name, fn, done):
-        """Run fn() on the single X worker; refuse while another X job runs."""
-        if self.job:
-            log.info("x: not starting '%s': busy with '%s'", name, self.job)
-            self.main.statusBar().showMessage(f"X is busy: {self.job}")
+    POOL = {"graph": "xgraph", "bulk": "xbulk"}  # checks use "x"
+
+    def running(self, kind):
+        return kind in self.jobs
+
+    def stop(self, kind):
+        if kind in self.cancels:
+            log.info("x: stop pressed for %s", self.jobs.get(kind, kind))
+            self.cancels[kind].set()
+            self.main.statusBar().showMessage(f"X: stopping {self.jobs.get(kind, kind)} after the current request…")
+
+    def start_job(self, kind, name, fn, done):
+        """Run fn(cancel) on this kind's X worker; refuse while a job of the same kind runs. -> True if started."""
+        if kind in self.jobs:
+            log.info("x: not starting '%s': '%s' is still running", name, self.jobs[kind])
+            self.main.statusBar().showMessage(f"X: {self.jobs[kind]} is still running")
             return False
         try:
             x.check(self.conf)
@@ -96,19 +107,22 @@ class XSection(Section):
             self.update_banner()
             return False
         log.info("x: job started: %s", name)
-        t0 = time.time()
-        self.job = name
+        t0, cancel = time.time(), threading.Event()
+        self.jobs[kind], self.cancels[kind] = name, cancel
         self.update_banner()
 
         def finished(res, err):
-            self.job = ""
+            self.jobs.pop(kind, None)
+            self.cancels.pop(kind, None)
+            if cancel.is_set() and not err:
+                log.info("x: job stopped: %s", name)
             log.info("x: job %s: %s (%.0f s)", "failed" if err else "done", name, time.time() - t0)
             if err:
                 log.warning("x: %s: %s", name, err)
                 self.main.statusBar().showMessage(str(err))
             done(res, err)
             self.update_banner()
-        run(fn, finished, "x")
+        run(lambda: fn(cancel), finished, self.POOL.get(kind, "x"))
         return True
 
     def resume(self):
@@ -137,23 +151,20 @@ class XSection(Section):
 
     def start_bulk(self, handle, following_max, followers_max, max_posts):
         conf, state, root = self.conf, self.state, self.conf["download_dir"]
-        self.bulk_cancel.clear()
-
         view = self.bulk_view(handle)
 
-        def work():
+        def work(cancel):
             x.bulk_plan(conf, state, handle, following_max, followers_max, max_posts)
-            return x.bulk_run(conf, state, root, self.bulk_cancel, self.bulk_progress, on_file=view.on_file)
-        if not self.start_job(f"bulk @{handle}", work, self.bulk_done):
+            return x.bulk_run(conf, state, root, cancel, self.bulk_progress, on_file=view.on_file)
+        if not self.start_job("bulk", f"bulk @{handle}", work, self.bulk_done):
             view.status.setText("Not started, see the banner.")
 
     def continue_bulk(self):
         b, conf, state, root = self.state["bulk"], self.conf, self.state, self.conf["download_dir"]
-        self.bulk_cancel.clear()
         log.info("x: continuing bulk @%s at account %d/%d", b["handle"], b["i"] + 1, len(b["accounts"]))
         view = self.bulk_view(b["handle"])
-        self.start_job(f"bulk @{b['handle']} (continued)",
-                       lambda: x.bulk_run(conf, state, root, self.bulk_cancel, self.bulk_progress, on_file=view.on_file), self.bulk_done)
+        self.start_job("bulk", f"bulk @{b['handle']} (continued)",
+                       lambda cancel: x.bulk_run(conf, state, root, cancel, self.bulk_progress, on_file=view.on_file), self.bulk_done)
 
     def bulk_view(self, handle):
         """The live tab of a bulk run: each image shows up the moment its file is saved."""
@@ -163,8 +174,7 @@ class XSection(Section):
         return view
 
     def cancel_bulk(self):
-        log.info("x: bulk cancel pressed")
-        self.bulk_cancel.set()
+        self.stop("bulk")
         self.bulk_note = "bulk: stopping after the current files…"
         self.update_banner()
 
@@ -310,7 +320,9 @@ class Ring(QWidget):
             elif g["built"]:
                 days = (time.time() - g["built"]) / 86400
                 self.graph_btn.setText(f"Rebuild graph (built {days:.0f} d ago)")
-            self.graph_btn.setEnabled(x.graph_due(st))
+            self.graph_btn.setEnabled(x.graph_due(st) or self.section.running("graph"))
+            if self.section.running("graph"):
+                self.graph_btn.setText("■ Stop graph (progress is kept)")
             self.graph_btn.setToolTip(f"Rebuilt at most every {x.REBUILD_DAYS} days. Reads the first {x.RING2_DEPTH} follows of "
                                       f"each of your follows: about {2 * len(st['follows']) or '…'} requests, hours at the safe pace.")
             self.who.setText(" · ".join(f"<a href='{html.escape(a['handle'])}'>@{html.escape(a['handle'])}</a> ({a['n']})"
@@ -327,23 +339,29 @@ class Ring(QWidget):
         self.refresh()
 
     def check(self):
-        sec = self.section
+        """⟳ Check next N accounts, or ■ Stop while that check runs. Posts show up account by account."""
+        sec, kind = self.section, f"check{self.ring}"
+        if sec.running(kind):
+            return sec.stop(kind)
         conf, state, ring = sec.conf, sec.state, self.ring
 
-        def work():
+        def work(cancel):
             accts = x.seed(conf, state) if ring == 1 else state["graph"]["ring2"]
-            return x.check_batch(conf, state, accts, ring, got=lambda posts: to_ui(lambda p, e: self.add_new(p), posts))
+            return x.check_batch(conf, state, accts, ring, got=lambda posts: to_ui(lambda p, e: self.add_new(p), posts), cancel=cancel)
 
         def done(n, err):
-            self.check_btn.setEnabled(True)
+            self.check_btn.setText(f"⟳ Check next {x.BATCH} accounts")
             self.refresh()
             if not err:
                 sec.main.statusBar().showMessage(f"X {self.label}: {n} new posts")
-        if sec.start_job(f"checking {self.label}", work, done):
-            self.check_btn.setEnabled(False)
+        if sec.start_job(kind, f"checking {self.label}", work, done):
+            self.check_btn.setText("■ Stop checking")
 
     def build(self):
+        """Build / continue the follow graph, or ■ Stop it (its progress is kept)."""
         sec = self.section
+        if sec.running("graph"):
+            return sec.stop("graph")
         conf, state = sec.conf, sec.state
 
         def progress(i, total):
@@ -354,12 +372,14 @@ class Ring(QWidget):
 
         def done(ring2, err):
             sec.graph_note = ""
-            self.graph_btn.setEnabled(True)
             self.refresh()
-            if not err:
-                sec.main.statusBar().showMessage(f"X: graph built, {len(ring2)} accounts to discover")
-        if sec.start_job("building the follow graph", lambda: x.build_ring2(conf, state, progress), done):
-            self.graph_btn.setEnabled(False)
+            if err:
+                return
+            sec.main.statusBar().showMessage(f"X: graph built, {len(ring2)} accounts to discover" if ring2 is not None
+                                             else "X: graph stopped; Continue graph picks it up")
+        if sec.start_job("graph", "building the follow graph", lambda cancel: x.build_ring2(conf, state, progress, cancel), done):
+            self.graph_btn.setText("■ Stop graph (progress is kept)")
+            self.graph_btn.setEnabled(True)
 
 
 class BulkDialog(QDialog):
