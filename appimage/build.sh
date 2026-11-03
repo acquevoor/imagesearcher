@@ -13,8 +13,10 @@ mkdir -p "$BUILD"
 # 1. portable Python: the newest python-build-standalone release for PY_SERIES (ponytail: newest at build time,
 #    pin PY_URL to a fixed asset if builds must be reproducible)
 if [ -z "${PY_URL:-}" ]; then
+  # the "+" in the asset names is written %2B in the download URLs
   PY_URL=$(curl -fsSL https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest |
-    grep -o "https://[^\"]*cpython-${PY_SERIES}\.[0-9]*+[0-9]*-x86_64-unknown-linux-gnu-install_only\.tar\.gz" | head -1)
+    grep -oE "https://[^\"]*cpython-${PY_SERIES//./\\.}\.[0-9]+(\+|%2B)[0-9]+-x86_64-unknown-linux-gnu-install_only\.tar\.gz" | head -1) || true
+  [ -n "$PY_URL" ] || { echo "could not find a python-build-standalone ${PY_SERIES} download (set PY_URL)" >&2; exit 1; }
 fi
 echo "python: $PY_URL"
 [ -f "$BUILD/python.tar.gz" ] || curl -fL -o "$BUILD/python.tar.gz" "$PY_URL"
