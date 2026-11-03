@@ -56,7 +56,7 @@ DEFAULTS = {
     "pixiv_map": {},  # booru tag -> Pixiv tag from its wiki ("" = none known)
     # X: opt-in, an alt account's session cookies; pauses set by x.pause_for. Graph + post cache live in x_state.json
     "x": {"enabled": False, "auth_token": "", "ct0": "", "seed_handle": "", "pause_min": 120, "pause_random": True,
-          "paused_until": 0, "locked": False, "reason": "", "pace": "jd", "alt_id": ""},
+          "paused_until": 0, "locked": False, "reason": "", "pace": "jd", "alt_id": "", "ua": ""},
     "x_saved": [],
     # Imageboard: opt-in; board -> FoolFuuka archive host; cf: Cloudflare passes (host -> cookie + user agent)
     "ib": {"enabled": False, "boards": {"trash": "desuarchive.org", "d": "desuarchive.org", "h": "archiveofsins.com"},

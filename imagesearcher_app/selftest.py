@@ -350,6 +350,16 @@ def xtest2():
     netscape = "# Netscape HTTP Cookie File\n#HttpOnly_.x.com\tTRUE\t/\tTRUE\t0\tauth_token\tAT\n.x.com\tTRUE\t/\tTRUE\t0\tct0\tC0\n"
     assert x.parse_cookies(netscape) == {"auth_token": "AT", "ct0": "C0"}
     assert x.parse_cookies("Cookie: guest_id=v1; auth_token=AT; ct0=C0") == {"guest_id": "v1", "auth_token": "AT", "ct0": "C0"}
+    # Flag Cookies' real layout: cookies nested by domain and keyed by name, plus the browser's user agent
+    ff = json.dumps({"userAgent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
+                     ".x.com": {".x.com": {n: {"name": n, "value": v, "domain": ".x.com", "path": "/", "secure": True, "fgRoot": False}
+                                           for n, v in (("guest_id", "g"), ("auth_token", "AT2"), ("ct0", "C2"), ("twid", "u%3D77"))}},
+                     ".google.com": {".google.com": {"ct0": {"name": "ct0", "value": "NO", "domain": ".google.com"}}}})
+    assert x.parse_cookies(ff) == {"guest_id": "g", "auth_token": "AT2", "ct0": "C2", "twid": "u%3D77"}
+    fc = {"x": {**core.DEFAULTS["x"], "enabled": True, "auth_token": ff}}
+    assert x.fix_pasted_export(fc) and fc["x"]["auth_token"] == "AT2" and fc["x"]["ct0"] == "C2" and fc["x"]["alt_id"] == "77"
+    assert fc["x"]["ua"].startswith("Mozilla/5.0 (X11") and x.headers(fc)["User-Agent"] == fc["x"]["ua"]
+    assert not x.fix_pasted_export(fc)  # a real token is left alone
     conf = {"x": {**core.DEFAULTS["x"], "enabled": True}}
     assert x.cookie_login(conf, flag) == "auth_token, ct0, alt account id 4242" and conf["x"]["alt_id"] == "4242"
     assert conf["x"]["auth_token"] == "AT" and x.ready(conf)  # logged in without a main @handle: bulk works

@@ -23,6 +23,8 @@ class XSection(Section):
 
     def __init__(self, main):
         super().__init__(main, "@handle   Enter = open that account's media tab")
+        if x.fix_pasted_export(self.conf):
+            save_conf(self.conf)
         self.state, self.job, self.graph_note, self.last_state, self.bulk_note = x.load_state(), "", "", "", ""
         self.bulk_cancel = threading.Event()
         st = self.state

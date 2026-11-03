@@ -159,6 +159,7 @@ class Settings(QDialog):
         self.x_token.setText(tmp["x"]["auth_token"])
         self.x_ct0.setText(tmp["x"]["ct0"])
         self.x_alt = tmp["x"]["alt_id"] or self.x_alt
+        self.x_ua = tmp["x"].get("ua", "")
         self.x_on.setChecked(True)
         self.x_note.setText(f"Got {summary}. Press Save (and Test login if you like).")
 
@@ -167,6 +168,9 @@ class Settings(QDialog):
         tmp = json.loads(json.dumps(self.parent().conf))
         tmp["x"].update(enabled=True, auth_token=self.x_token.text().strip(), ct0=self.x_ct0.text().strip(),
                         pace=self.x_pace.currentData(), alt_id=self.x_alt)
+        if getattr(self, "x_ua", ""):
+            tmp["x"]["ua"] = self.x_ua
+        x.fix_pasted_export(tmp)
         who = self.x_seed.text().strip().lstrip("@") or "X"
         self.x_note.setText("Testing…")
         self.x_test.setEnabled(False)
@@ -216,9 +220,12 @@ class Settings(QDialog):
             pixiv.logout()
         conf["blacklist"] = sorted(set(self.bl.toPlainText().lower().split()))
         conf["download_dir"], conf["limit"] = self.dir.text().strip(), self.limit.value()
+        if getattr(self, "x_ua", ""):
+            conf["x"]["ua"] = self.x_ua
         conf["x"].update(enabled=self.x_on.isChecked(), auth_token=self.x_token.text().strip(), ct0=self.x_ct0.text().strip(),
                          seed_handle=self.x_seed.text().strip().lstrip("@"), pause_min=self.x_pause.value(), pause_random=self.x_rand.isChecked(),
                          pace=self.x_pace.currentData(), alt_id=self.x_alt)
+        x.fix_pasted_export(conf)  # a whole export pasted into the auth_token field
         conf["paw"].update(host=self.paw_host.text().strip() or "pawchive.pw", node=self.paw_node.value(), session=self.paw_session)
         pairs = [ln.split() for ln in self.ib_boards.toPlainText().splitlines() if len(ln.split()) == 2]
         conf["ib"].update(enabled=self.ib_on.isChecked(), names=self.ib_names.currentData(),

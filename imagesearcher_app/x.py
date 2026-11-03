@@ -161,6 +161,18 @@ def check(conf):
         raise Paused(why)
 
 
+def fix_pasted_export(conf):
+    """A whole cookie export typed / pasted into the auth_token field: unpack it. -> True if it changed anything."""
+    tok = conf["x"]["auth_token"]
+    if len(tok) > 200 or tok.lstrip().startswith(("{", "[", "#")) or ";" in tok:
+        try:
+            log.info("x: the auth_token field holds a whole cookie export, unpacking it: %s", cookie_login(conf, tok))
+            return True
+        except RuntimeError as e:
+            log.warning("x: the auth_token field holds something that isn't a cookie: %s", e)
+    return False
+
+
 def ready(conf):
     """Logged in (cookies present). The main @handle is only needed for Timeline / Discover (seed)."""
     c = conf["x"]
@@ -173,7 +185,7 @@ def headers(conf):
     c = conf["x"]
     return {"Authorization": "Bearer " + BEARER, "x-csrf-token": c["ct0"], "Cookie": f"auth_token={c['auth_token']}; ct0={c['ct0']}",
             "x-twitter-auth-type": "OAuth2Session", "x-twitter-active-user": "yes", "x-twitter-client-language": "en",
-            "User-Agent": UA, "Referer": "https://x.com/", "Accept": "*/*"}
+            "User-Agent": c.get("ua") or UA, "Referer": "https://x.com/", "Accept": "*/*"}
 
 
 def error_kind(status, body):
@@ -636,14 +648,15 @@ def parse_cookies(text, domains=X_DOMAINS):
     text = (text or "").strip()
     ok = lambda dom: not dom or any(dom.lstrip(".").endswith(d) for d in domains)  # noqa: E731
     data = _json_in(text)
-    if isinstance(data, dict):
-        inner = next((data[k] for k in ("cookies", "Cookies", "data") if isinstance(data.get(k), list)), None)
-        if inner is None:  # a plain {name: value} object
-            return {k: str(v) for k, v in data.items() if isinstance(v, (str, int))}
-        data = inner
-    if isinstance(data, list):
-        return {str(c["name"]): str(c.get("value", "")) for c in data
-                if isinstance(c, dict) and "name" in c and ok(str(c.get("domain", "")))}
+    if data is not None:
+        # cookie objects ({name, value, domain…}) at any depth: a list (EditThisCookie, Cookie-Editor), a wrapper object,
+        # or Flag Cookies' {"userAgent": …, ".x.com": {".x.com": {"auth_token": {name, value, …}}}}
+        found = [c for c in walk(data) if isinstance(c.get("name"), str) and "value" in c and ok(str(c.get("domain", "")))]
+        if found:
+            return {c["name"]: str(c["value"]) for c in found}
+        if isinstance(data, dict):  # a plain {name: value} object
+            return {k: str(v) for k, v in data.items() if isinstance(v, (str, int)) and k != "userAgent"}
+        return {}
     out = {}
     for line in text.splitlines():  # Netscape cookies.txt
         line = line.strip()
@@ -662,17 +675,28 @@ def parse_cookies(text, domains=X_DOMAINS):
     return out
 
 
+def export_user_agent(text):
+    """The browser's user agent when the export carries one (Flag Cookies does): requests then look like that browser."""
+    data = _json_in((text or "").strip())
+    ua = data.get("userAgent") if isinstance(data, dict) else None
+    return ua if isinstance(ua, str) and ua.startswith("Mozilla/") else ""
+
+
 def cookie_login(conf, text):
-    """Store auth_token + ct0 (+ the alt's own id from twid) from pasted cookies -> summary text."""
+    """Store auth_token + ct0 (+ the alt's own id from twid, + the browser's user agent if exported) from pasted
+    cookies -> summary text."""
     cookies = parse_cookies(text)
     missing = [n for n in ("auth_token", "ct0") if not cookies.get(n)]
     if missing:
         found = ", ".join(sorted(cookies)[:12]) or "nothing that looks like cookies"
         raise RuntimeError(f"no {' / '.join(missing)} in the pasted cookies (logged in on x.com in that browser?). Found: {found}")
     m = re.search(r"u=(\d+)", urllib.parse.unquote(cookies.get("twid", "")))
+    ua = export_user_agent(text)
     with CONF_LOCK:
         conf["x"].update(auth_token=cookies["auth_token"], ct0=cookies["ct0"], alt_id=m[1] if m else "")
-    summary = "auth_token, ct0" + (f", alt account id {m[1]}" if m else "")
+        if ua:
+            conf["x"]["ua"] = ua
+    summary = "auth_token, ct0" + (f", alt account id {m[1]}" if m else "") + (", your browser's user agent" if ua else "")
     log.info("x: cookies pasted: %s (%d cookies in the paste)", summary, len(cookies))
     return summary
 
