@@ -1,4 +1,5 @@
 """Offline self-check (`imagesearcher.py --selftest`, also the Nix flake check): parsers fed with trimmed real replies."""
+import hashlib
 import io
 import json
 import logging
@@ -8,7 +9,7 @@ import time
 import urllib.error
 from pathlib import Path
 
-from . import boorus, bridge, core, imageboard as ib, keys, pixiv, x
+from . import boorus, bridge, core, imageboard as ib, keys, pawchive as pw, pixiv, x
 from .booru_ui import follow_srcs
 from .core import CACHE_MARK, cached, clear_cache, dest, fold, interleave, local, move_favorite, preset, rating_ok, allowed
 
@@ -214,6 +215,7 @@ def selftest():
         assert [ln.split(" ", 2)[2] for ln in lines] == ["one", "two"], lines  # same day appends, toggle off stops
     xtest()
     ibtest()
+    pawtest()
     print("selftest ok")
 
 
@@ -576,3 +578,119 @@ def ibtest():
             assert ib.headers(conf, "archived.moe") == {"Cookie": "cf_clearance=CF", "User-Agent": "UA/1"} and ib.headers(conf, "desuarchive.org") == {}
         finally:
             ib.open_url = orig_open
+
+
+
+def pawtest():
+    """Pawchive: post parsing (file servers, preview-only files, other attachments, Postgres tag arrays), HTML
+    cards and tags, the creator list filter, cookie login, the 429 retry, original-filename saving by SHA-256,
+    and a bulk run that resumes at its saved offset."""
+    conf = {"paw": json.loads(json.dumps(core.DEFAULTS["paw"])), "favorites": []}
+    sha_a = "aad7c3ee6d33066244c7279b5d731c01a084a58169f6c7b7954b20b4dfa84161"
+    post = {"id": "174231470", "user": "103431", "service": "patreon", "title": "Sneak Peek #57", "content": "<p>Two <em>new</em> characters</p>",
+            "published": "2026-11-03T04:00:00", "tags": '{"$10 Sneak Peeks","Character Bios"}', "prev": None, "next": "174228515",
+            "file": {"name": "Veronica_OP2.png", "node": 2, "path": f"/aa/d7/{sha_a}.png"},
+            "attachments": [{"name": "Veronica_OP2.png", "node": 2, "path": f"/aa/d7/{sha_a}.png"},  # same as the main file: once
+                            {"name": "teaser.jpg", "path": "/58/f2/58f2.jpg", "preview_only": True},
+                            {"name": "clip.mp4", "path": "/11/22/1122.mp4"},
+                            {"name": "pack.zip", "node": 2, "path": "/33/44/3344.zip"}]}
+    p = pw.parse_post(post, conf)
+    assert p["id"] == "patreon-103431-174231470" and p["names"] == ["Veronica_OP2.png", "teaser.jpg", "clip.mp4"]
+    assert p["files"][0] == f"https://n2.pawchive.pw/data/aa/d7/{sha_a}.png?f=Veronica_OP2.png"
+    assert p["files"][1] == "https://img.pawchive.pw/thumbnail/data/58/f2/58f2.jpg" and p["preview"] == 1  # preview only: the thumbnail
+    assert p["files"][2] == "https://n2.pawchive.pw/data/11/22/1122.mp4?f=clip.mp4"  # no node in the reply: the default server
+    assert p["other"] == [{"name": "pack.zip", "url": "https://n2.pawchive.pw/data/33/44/3344.zip?f=pack.zip"}]
+    assert p["tags"] == ["$10 Sneak Peeks", "Character Bios", "service:patreon", "creator:patreon/103431"]
+    assert p["content"] == "Two new characters" and p["next"] == "174228515" and p["thumb"].startswith("https://img.pawchive.pw/thumbnail/")
+    assert pw.parse_post({**post, "file": {}, "attachments": [{"name": "a.zip", "path": "/x/y/a.zip"}]}, conf) is None
+    assert pw.pg_array(["a"]) == ["a"] and pw.pg_array("{solo,\"two words\"}") == ["solo", "two words"] and pw.sha_of_url(p["files"][0]) == sha_a
+
+    card = ('<article class="post-card post-card--preview" data-id="173960633" data-service="patreon" data-user="92168361" >'
+            '<a href="/patreon/user/92168361/post/173960633"><header class="post-card__header"> Trick or... Treat? </header>'
+            '<div class="post-card__image-container"><img class="post-card__image" src="https://img.pawchive.pw/thumbnail/data/fa/24/fa24.jpg" '
+            'alt="x" loading="lazy"></div><footer><div> 1 attachment <br> 1,185 favorites </div></footer></a></article>'
+            '<article\n    class="post-card" data-id="9" data-service="fanbox" data-user="7"><header class="post-card__header">text only</header></article>'
+            '<article\n    class="post-card post-card--preview"\n    data-id="10"\n    data-service="fanbox"\n    data-user="7"\n  >'
+            '<header class="post-card__header">multi line</header><img class="post-card__image" src="https://img.pawchive.pw/t.jpg"></article>')
+    cards = pw.parse_cards(conf, card)
+    assert len(cards) == 2 and cards[1]["title"] == "multi line" and cards[0]["stub"] and cards[0]["title"] == "Trick or... Treat?" and cards[0]["favorites"] == 1185
+    assert cards[0]["id"] == "patreon-92168361-173960633" and cards[0]["thumb"].endswith("/fa24.jpg")
+    tags_html = ('<section id="tag-container"><article><a href="/posts?tag=wip"><span>wip</span><span>302777</span></a></article>'
+                 '<article><a href="/posts?tag=nsfw"><span>nsfw</span><span>531579</span></a></article>'
+                 '<article><a href="/posts?tag=Character+Bios"><span>Character Bios</span><span>12</span></a></article></section>')
+    assert pw.parse_tags(tags_html) == [("nsfw", 531579), ("wip", 302777), ("Character Bios", 12)]
+
+    rows = [{"id": "1", "name": "Jimjim", "service": "patreon", "updated": 1793682000, "favorited": 10, "public_id": "Jimjim3dx"},
+            {"id": "2", "name": "jimmy", "service": "fanbox", "updated": "2026-10-01T00:00:00", "favorited": 50},
+            {"id": "3", "name": "Other", "service": "patreon", "updated": "2026-11-04T00:00:00", "favorited": 1}]
+    assert [c["id"] for c in pw.find_creators(rows, "JIM")] == ["1", "2"]
+    assert [c["id"] for c in pw.find_creators(rows, "jim", sort="Favorited")] == ["2", "1"]
+    assert [c["id"] for c in pw.find_creators(rows, "", "patreon")] == ["3", "1"] and pw.find_creators(rows, "3dx")[0]["id"] == "1"
+
+    flag = json.dumps([{"domain": "pawchive.pw", "name": "session", "value": "SESS"}, {"domain": ".x.com", "name": "session", "value": "WRONG"}])
+    assert pw.cookie_login(conf, flag) == "session" and conf["paw"]["session"] == "SESS"
+    assert pw._headers(conf)["Cookie"] == "session=SESS"
+    try:
+        pw.cookie_login(conf, "guest=1")
+        raise AssertionError("must refuse a paste without the session cookie")
+    except RuntimeError:
+        pass
+
+    seq, waits = [], []
+
+    class R(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def send(conf, url, method, accept):
+        item = seq.pop(0)
+        if item == 429:
+            raise urllib.error.HTTPError(url, 429, "Too Many Requests", {"Retry-After": "7"}, io.BytesIO(b""))
+        return R(item)
+    seq[:] = [429, b"[1]"]
+    assert pw._open(conf, "u", sleep=waits.append, send=send) == (200, b"[1]") and waits == [7]
+    seq[:] = [429, 429]
+    assert pw._open(conf, "u", sleep=waits.append, send=send)[0] == 429  # retried once only
+
+    with tempfile.TemporaryDirectory() as tmp:  # original filenames: same file (SHA-256) reused, a different one gets (2)
+        body = b"pawchive test file"
+        sha = hashlib.sha256(body).hexdigest()
+        q = {**p, "files": [f"https://n2.pawchive.pw/data/aa/bb/{sha}.png?f=a.png"], "names": ["a.png"], "other": []}
+        orig_open, orig_cn = pw.open_url, pw.creator_name
+        pw.open_url = lambda url, timeout=30, headers=None: R(body)
+        pw.creator_name = lambda conf, s, u: "Jimjim"
+        try:
+            assert pw.save(conf, q, tmp) == (1, 0)
+            f = Path(tmp, "pawchive", "Jimjim (patreon)", "174231470 - Sneak Peek #57", "a.png")
+            assert f.read_bytes() == body and pw.sha256_file(f) == sha
+            assert pw.save(conf, q, tmp) == (0, 1)
+            other = {**q, "files": [f"https://n2.pawchive.pw/data/cc/dd/{'0' * 64}.png?f=a.png"]}
+            assert pw.target(conf, other, tmp, "a.png", other["files"][0]).name == "a (2).png"
+            assert pw.saved_paths(conf, q, tmp) == [f]
+
+            # bulk: page 1 saved, cancel during page 2, Continue resumes at offset 2 (not 0)
+            pages = {0: [post, {**post, "id": "2"}], 2: [{**post, "id": "3"}], 3: []}
+            calls, saved_ids = [], []
+            orig_api, orig_save, orig_sc = pw.api, pw.save, pw.save_conf
+            pw.api = lambda conf, path, **kw: (calls.append(kw.get("o")), pages[kw.get("o", 0)])[1]
+            pw.save_conf = lambda c: None
+            cancel = threading.Event()
+
+            def fake_save(conf, post, root, cancel_=None, everything=False):
+                saved_ids.append(post["post_id"])
+                if post["post_id"] == "3" and not cancel.is_set() and calls.count(2) == 1:
+                    cancel.set()
+                return 1, 0
+            pw.save = fake_save
+            st = pw.bulk_creator(conf, "patreon", "103431", tmp, cancel)
+            assert not st["done"] and st["o"] == 2 and conf["paw"]["bulk"]["patreon/103431"]["o"] == 2
+            st = pw.bulk_creator(conf, "patreon", "103431", tmp, threading.Event())
+            assert st["done"] and st["o"] == 3 and calls == [0, 2, 2, 3] and sorted(saved_ids) == ["174231470", "2", "3", "3"]
+        finally:
+            pw.open_url, pw.creator_name = orig_open, orig_cn
+            pw.api, pw.save, pw.save_conf = orig_api, orig_save, orig_sc

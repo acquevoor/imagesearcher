@@ -123,7 +123,7 @@ class BooruSection(Section):
 
     # --- favorites / follows ---
     def refresh_favs(self):
-        favs = [p for p in self.conf["favorites"] if p["site"] not in ("pixiv", "x", "ib")]
+        favs = [p for p in self.conf["favorites"] if p["site"] not in ("pixiv", "x", "ib", "paw")]
         self.favs.restart()
         self.favs.add(favs)
         self.tabs.setTabText(self.tabs.indexOf(self.favs.imgtabs), f"Favorites ({len(favs)})")

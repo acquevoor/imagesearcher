@@ -62,6 +62,9 @@ DEFAULTS = {
     "ib": {"enabled": False, "boards": {"trash": "desuarchive.org", "d": "desuarchive.org", "h": "archiveofsins.com"},
            "cf": {}, "watch": {}, "names": "original"},
     "ib_saved": [],
+    # Pawchive: host (pawchive.st moved to .pw), default file server node, the pasted session cookie, bulk progress
+    "paw": {"host": "pawchive.pw", "node": 2, "session": "", "bulk": {}},
+    "paw_saved": [],
 }
 CONF_LOCK = threading.RLock()  # workers add to pixiv_map / refresh the Pixiv token while the UI saves
 
@@ -218,8 +221,8 @@ def qs(**params):
 
 
 # ---------- posts ----------
-LABELS = {"pixiv": "PX", "x": "X", "ib": "4ch"}  # site id -> short tile label, filled from the booru registry
-NAMES = {"pixiv": "Pixiv", "x": "X", "ib": "Imageboard"}
+LABELS = {"pixiv": "PX", "x": "X", "ib": "4ch", "paw": "PW"}  # site id -> short tile label, filled from the booru registry
+NAMES = {"pixiv": "Pixiv", "x": "X", "ib": "Imageboard", "paw": "Pawchive"}
 
 
 def make_post(site, pid, thumb, files, samples, tags, rating, page, w=0, h=0, **extra):

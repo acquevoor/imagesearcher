@@ -629,12 +629,12 @@ def _json_in(text):
     return None
 
 
-def parse_cookies(text):
-    """Pasted cookies -> {name: value} for x.com / twitter.com. Takes the Flag Cookies / EditThisCookie /
-    Cookie-Editor JSON export (a list of {name, value, domain}, maybe wrapped in an object), Netscape
-    cookies.txt lines, or a raw "Cookie: a=b; c=d" header. Cookies of other domains are dropped."""
+def parse_cookies(text, domains=X_DOMAINS):
+    """Pasted cookies -> {name: value} for `domains` (default x.com / twitter.com). Takes the Flag Cookies /
+    EditThisCookie / Cookie-Editor JSON export (a list of {name, value, domain}, maybe wrapped in an object),
+    Netscape cookies.txt lines, or a raw "Cookie: a=b; c=d" header. Cookies of other domains are dropped."""
     text = (text or "").strip()
-    ok = lambda dom: not dom or any(dom.lstrip(".").endswith(d) for d in X_DOMAINS)  # noqa: E731
+    ok = lambda dom: not dom or any(dom.lstrip(".").endswith(d) for d in domains)  # noqa: E731
     data = _json_in(text)
     if isinstance(data, dict):
         inner = next((data[k] for k in ("cookies", "Cookies", "data") if isinstance(data.get(k), list)), None)

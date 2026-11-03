@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from . import core, imageboard, pixiv, x
+from . import core, imageboard, pawchive, pixiv, x
 from .booru_ui import BooruSection
 from .keys import KeysDialog, missing
 from .core import (
@@ -24,10 +24,11 @@ from .core import (
 )
 from .pixiv_ui import PixivSection
 from .ib_ui import IBSection, pass_cloudflare
+from .paw_ui import PawSection
 from .x_ui import XSection
 
 
-SECRETS = {"refresh_token", "auth_token", "ct0", "key"}
+SECRETS = {"refresh_token", "auth_token", "ct0", "key", "session", "cookie"}
 
 
 def log_changes(before, after, path=""):
@@ -112,6 +113,20 @@ class Settings(QDialog):
         row.addWidget(self.x_pause)
         row.addWidget(self.x_rand)
         form.addRow("Careful pace: pause on a rate limit for", row)
+        # Pawchive (always on): host, file server, login by pasted cookie
+        pc = c["paw"]
+        form.addRow(QLabel("<b>Pawchive</b> — log in like JDownloader: on pawchive.pw (logged in) copy the cookies with the "
+                           "<b>Flag Cookies</b> extension, then press 📋 Paste cookies. Only needed for account favorites.", wordWrap=True))
+        self.paw_host = QLineEdit(pc["host"])
+        self.paw_node = QSpinBox(minimum=1, maximum=9, value=int(pc["node"]), prefix="n", toolTip="File server used when a post doesn't say")
+        self.paw_session = pc["session"]
+        self.paw_note = QLabel("logged in" if pc["session"] else "not logged in", wordWrap=True)
+        row = QHBoxLayout()
+        for w in (self.paw_host, self.paw_node, QPushButton("📋 Paste cookies", clicked=self.paste_paw),
+                  QPushButton("Test login", clicked=self.test_paw), QPushButton("Log out", clicked=self.logout_paw)):
+            row.addWidget(w)
+        form.addRow("Pawchive", row)
+        form.addRow("", self.paw_note)
         # Imageboard: opt-in
         ic = c["ib"]
         self.ib_on = QCheckBox("Enable the Imageboard section (restart to show/hide it)", checked=ic["enabled"])
@@ -164,6 +179,26 @@ class Settings(QDialog):
             self.x_note.setText(msg)
         run(lambda: x.user(tmp, x.load_state(), who), done, "x")
 
+    def paste_paw(self):
+        tmp = {"paw": {**self.parent().conf["paw"], "host": self.paw_host.text().strip()}}
+        try:
+            pawchive.cookie_login(tmp, QApplication.clipboard().text())
+        except RuntimeError as e:
+            return self.paw_note.setText(f"<i>{e}</i>")
+        self.paw_session = tmp["paw"]["session"]
+        self.paw_note.setText("Got the session cookie. Press Save (and Test login if you like).")
+
+    def test_paw(self):
+        tmp = json.loads(json.dumps(self.parent().conf))
+        tmp["paw"].update(host=self.paw_host.text().strip(), session=self.paw_session)
+        self.paw_note.setText("Testing…")
+        run(lambda: pawchive.check_login(tmp),
+            lambda r, e: self.paw_note.setText(f"✗ {e}" if e else f"✓ logged in: {r[0]} favorite posts, {r[1]} favorite artists"))
+
+    def logout_paw(self):
+        self.paw_session = ""
+        self.paw_note.setText("Logged out (press Save)")
+
     def fetch_keys(self):
         """The key fetcher; afterwards the token field shows what it saved, so Save can't put the old one back."""
         d = KeysDialog(self.parent())
@@ -184,6 +219,7 @@ class Settings(QDialog):
         conf["x"].update(enabled=self.x_on.isChecked(), auth_token=self.x_token.text().strip(), ct0=self.x_ct0.text().strip(),
                          seed_handle=self.x_seed.text().strip().lstrip("@"), pause_min=self.x_pause.value(), pause_random=self.x_rand.isChecked(),
                          pace=self.x_pace.currentData(), alt_id=self.x_alt)
+        conf["paw"].update(host=self.paw_host.text().strip() or "pawchive.pw", node=self.paw_node.value(), session=self.paw_session)
         pairs = [ln.split() for ln in self.ib_boards.toPlainText().splitlines() if len(ln.split()) == 2]
         conf["ib"].update(enabled=self.ib_on.isChecked(), names=self.ib_names.currentData(),
                           boards={b.strip("/").lower(): h.lower() for b, h in pairs} or conf["ib"]["boards"])
@@ -200,10 +236,11 @@ class Main(QMainWindow):
         top = QHBoxLayout()
         self.stack = QStackedWidget()
         self.boorus, self.pixiv = BooruSection(self), PixivSection(self)
+        self.paw = PawSection(self)
         self.x = XSection(self) if self.conf["x"]["enabled"] else None
         self.ib = IBSection(self) if self.conf["ib"]["enabled"] else None
-        secs = [(self.boorus, "Boorus", "Ctrl+1"), (self.pixiv, "Pixiv", "Ctrl+2")] + ([(self.x, "X", "Ctrl+3")] if self.x else []) \
-            + ([(self.ib, "Imageboard", "Ctrl+4")] if self.ib else [])
+        secs = [(self.boorus, "Boorus", "Ctrl+1"), (self.pixiv, "Pixiv", "Ctrl+2"), (self.paw, "Pawchive", "Ctrl+5")] \
+            + ([(self.x, "X", "Ctrl+3")] if self.x else []) + ([(self.ib, "Imageboard", "Ctrl+4")] if self.ib else [])
         for i, (sec, name, key) in enumerate(secs):
             b = QPushButton(f"{name}", checkable=True, toolTip=key, minimumWidth=110)
             self.switch.addButton(b, i)
@@ -229,14 +266,14 @@ class Main(QMainWindow):
         self.statusBar().addPermanentWidget(self.cancel_btn)
         self.last_status = ""
         self.statusBar().messageChanged.connect(self.log_status)  # everything shown down there is in the log too
-        self.show_section({"pixiv": self.pixiv, "x": self.x, "ib": self.ib}.get(self.conf["section"]) or self.boorus)
+        self.show_section({"pixiv": self.pixiv, "x": self.x, "ib": self.ib, "paw": self.paw}.get(self.conf["section"]) or self.boorus)
 
     def show_section(self, sec):
         if self.stack.currentWidget() is not sec:
             log.info("section -> %s", self.switch.button(self.stack.indexOf(sec)).text())
         self.stack.setCurrentWidget(sec)
         self.switch.button(self.stack.indexOf(sec)).setChecked(True)
-        self.conf["section"] = {id(self.pixiv): "pixiv", id(self.x): "x", id(self.ib): "ib"}.get(id(sec), "boorus")
+        self.conf["section"] = {id(self.pixiv): "pixiv", id(self.x): "x", id(self.ib): "ib", id(self.paw): "paw"}.get(id(sec), "boorus")
 
     def log_status(self, msg):
         if msg and msg != self.last_status and not msg.startswith("Loading page"):
@@ -266,7 +303,7 @@ class Main(QMainWindow):
             favs.insert(0, p)
             log.info("favorite %s #%s", p["site"], p["id"])
         save_conf(self.conf)
-        sec = {"pixiv": self.pixiv, "x": self.x, "ib": self.ib}.get(p["site"], self.boorus)
+        sec = {"pixiv": self.pixiv, "x": self.x, "ib": self.ib, "paw": self.paw}.get(p["site"], self.boorus)
         if sec:  # open image tabs keep their own post
             sec.refresh_favs()
         root, fav = self.conf["download_dir"], self.is_fav(p)
@@ -281,6 +318,8 @@ class Main(QMainWindow):
     def save_post(self, p, root, label, cancel=None):
         if p["site"] == "ib":  # original filenames, imageboard/<board>/<label>/
             return imageboard.save(self.conf, p, root, label, cancel)
+        if p["site"] == "paw":  # original filenames, pawchive/<creator> (<service>)/<post> - <title>/
+            return pawchive.save(self.conf, p, root, cancel)
         if p.get("ugoira"):
             return pixiv.download_ugoira(self.conf, p, root, label)
         return download_post(p, root, label, cancel)
@@ -399,6 +438,11 @@ def main():
     log.info("boorus on: %s; pixiv: %s; x: %s", ", ".join(b["name"] for b in c["boorus"] if b["on"]) or "none",
              "token set" if c["pixiv"]["refresh_token"] else "no token",
              "off" if not c["x"]["enabled"] else f"on, missing {', '.join(x_missing(c))}" if x_missing(c) else "on, set up")
+    from PySide6.QtGui import QImageReader
+    if b"webp" not in [bytes(f) for f in QImageReader.supportedImageFormats()]:
+        log.warning("this Qt can't decode WebP images (Pawchive thumbnails, some booru files show blank): "
+                    "install Qt's imageformats plugin (Nix: qt6.qtimageformats on QT_PLUGIN_PATH)")
+    log.info("pawchive: %s, file server n%s, %s", c["paw"]["host"], c["paw"]["node"], "logged in" if c["paw"]["session"] else "not logged in")
     log.info("imageboard: %s", "off" if not c["ib"]["enabled"] else
              "on, " + ", ".join(f"/{b}/ via {h}" for b, h in c["ib"]["boards"].items()) + (f"; Cloudflare passed for {', '.join(c['ib']['cf'])}" if c["ib"]["cf"] else ""))
     w.show()

@@ -21,6 +21,7 @@ stdenvNoCC.mkDerivation {
     makeWrapper ${python3.withPackages (ps: [ ps.pyside6 ])}/bin/python $out/bin/imagesearcher \
       --add-flags $out/share/imagesearcher/imagesearcher.py \
       --prefix QT_PLUGIN_PATH : ${qt6.qtwayland}/${qt6.qtbase.qtPluginPrefix} \
+      --prefix QT_PLUGIN_PATH : ${qt6.qtimageformats}/${qt6.qtbase.qtPluginPrefix} \
       --suffix PATH : ${lib.makeBinPath [ mpv ]}
     runHook postInstall
   '';

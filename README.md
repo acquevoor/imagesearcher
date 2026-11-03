@@ -107,6 +107,35 @@ The cookies are stored only in your config file (mode 0600) and are never logged
 
 **Sensitive media** gets `rating:e`, so blacklist `rating:e` to hide it. Turn on "Display media that may contain sensitive content" in the alt's X settings.
 
+## Pawchive
+Pawchive (pawchive.st, now **pawchive.pw**) is a Kemono-style archive of creators' paywalled posts from Patreon, Fanbox and similar sites. One post is one tile, and its images and videos are the tile's pages (PgUp/PgDn, ▤ strip view).
+
+**Browsing**
+- **Recent** shows the latest posts, and the search box searches them; type `@name` to open an artist.
+- **Popular** shows the top posts of a day, week or month; pick an end date.
+- **Artists** lists every creator: filter by name or service, sort by updated, favorites or name. The list is about 16 MB and is downloaded at most once a day.
+- **Tags** lists the site's 2,000 most used tags.
+- 🎲 opens a random post or a random artist.
+
+**Creator tab:** the creator's posts, which you can search or filter by their tags; links to their accounts on other sites; **Announcements**; **Fancards** (Fanbox only); **♥ Favorite**; and **⬇ Bulk creator**.
+
+**⬇ Bulk creator** saves every post into `<download dir>/pawchive/<creator> (<service>)/<post> - <title>/`, under the original filenames. Choose "Images and videos" or "Everything", which also includes zip and psd attachments. It downloads 3 posts at a time, and images show in a live tab as they're saved. Use **Continue bulk** to resume where it stopped.
+
+**On an image:** 📄 **Post details** shows the full text, the other attachments, comments, revisions and the previous/next post. 🔍 **Same file elsewhere** looks the file up by its hash, ⚑ **Flag post** asks Pawchive to re-import it, and there are ♥ favorite buttons for your account.
+
+**🔍 Find by hash…** checks which posts hold the files you pick from your disk.
+
+**"Preview only"** pages are posts where the archive kept only a small preview of a file.
+
+**Account (optional)**: account favorites need you to be logged in.
+1. Log in on pawchive.pw in your browser.
+2. Copy the cookies with the **Flag Cookies** extension.
+3. Press **📋 Paste cookies**, then **Test login** in ⚙. Only the `session` cookie is kept, and it's never logged.
+
+**Importer** opens the site's own importer page in your browser; the app never touches your Patreon or Fanbox keys.
+
+**Thumbnails need WebP support.** Pawchive's thumbnails are WebP files. The Nix package and the Windows PySide6 install include it. If thumbnails show blank, the log will say that WebP support is missing.
+
 ## Imageboard (opt-in)
 Browse 4chan's **/trash/**, **/d/** and **/h/**, live and through the archives. Switch it on in ⚙, then restart. These boards are NSFW.
 
