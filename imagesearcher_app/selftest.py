@@ -2,6 +2,7 @@
 import json
 import logging
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -328,3 +329,149 @@ def xtest():
             assert x.load_state()["checked"]["1"] and oct(x.STATE_PATH.stat().st_mode)[-3:] == "600"
         finally:
             x.STATE_PATH, x.user_tweets = orig
+    xtest2()
+
+
+def xtest2():
+    """X login by pasted cookies (JDownloader / Flag Cookies style), both paces, the jd 429 wait-and-retry,
+    and a resumable bulk run (lock mid-run, continue without repeating pages)."""
+    flag = json.dumps([{"domain": ".x.com", "name": "auth_token", "value": "AT", "httpOnly": True},
+                       {"domain": ".x.com", "name": "ct0", "value": "C0"},
+                       {"domain": ".x.com", "name": "twid", "value": "u%3D4242"},
+                       {"domain": ".google.com", "name": "ct0", "value": "WRONG"}])
+    assert x.parse_cookies("x.com cookies:\n" + flag) == {"auth_token": "AT", "ct0": "C0", "twid": "u%3D4242"}
+    assert x.parse_cookies(json.dumps({"url": "https://x.com", "cookies": json.loads(flag)}))["ct0"] == "C0"
+    netscape = "# Netscape HTTP Cookie File\n#HttpOnly_.x.com\tTRUE\t/\tTRUE\t0\tauth_token\tAT\n.x.com\tTRUE\t/\tTRUE\t0\tct0\tC0\n"
+    assert x.parse_cookies(netscape) == {"auth_token": "AT", "ct0": "C0"}
+    assert x.parse_cookies("Cookie: guest_id=v1; auth_token=AT; ct0=C0") == {"guest_id": "v1", "auth_token": "AT", "ct0": "C0"}
+    conf = {"x": {**core.DEFAULTS["x"], "enabled": True}}
+    assert x.cookie_login(conf, flag) == "auth_token, ct0, alt account id 4242" and conf["x"]["alt_id"] == "4242"
+    assert conf["x"]["auth_token"] == "AT" and x.ready(conf)  # logged in without a main @handle: bulk works
+    try:
+        x.cookie_login(conf, "guest_id=1; personalization_id=2")
+        raise AssertionError("must name what it found")
+    except RuntimeError as e:
+        assert "auth_token / ct0" in str(e) and "guest_id" in str(e)
+    try:
+        x.seed(conf, {"seed": {}, "follows": []})
+        raise AssertionError("seed needs a main handle")
+    except RuntimeError as e:
+        assert str(e) == x.NO_SEED
+
+    # jd pace: ~1 s gaps, no hourly cap, waits for an exhausted operation's reset
+    now, slept = [1000.0], []
+    b = x.Budget(clock=lambda: now[0], sleep=lambda t: (slept.append(t), now.__setitem__(0, now[0] + t)), rand=lambda: 0.0)
+    for _ in range(x.HOURLY + 10):
+        b.wait(pace="jd", op="UserMedia")
+    assert all(abs(t - x.JD_GAP) < 1e-9 for t in slept) and len(slept) == x.HOURLY + 9
+    b.note("UserMedia", {"x-rate-limit-remaining": "1", "x-rate-limit-reset": str(int(now[0]) + 600)})
+    b.wait(pace="jd", op="UserTweets")  # other operations are not held up
+    assert slept[-1] == x.JD_GAP
+    b.wait(pace="jd", op="UserMedia")
+    assert now[0] >= b.limits["UserMedia"][1] + 2 and "JDownloader pace" in b.status("jd")
+    b.note("UserMedia", {"x-rate-limit-remaining": "499", "x-rate-limit-reset": str(int(now[0]) + 900)})
+    assert "UserMedia 499 left" in b.status("jd")
+
+    # jd 429: wait until reset, retry once; a second 429 pauses. Careful 429: pause at once.
+    import io, urllib.error  # noqa: E401
+    calls = []
+
+    class Reply(io.BytesIO):
+        headers = {"x-rate-limit-remaining": "300", "x-rate-limit-reset": "0"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_open(seq):
+        def op(url, headers=None, timeout=30):
+            calls.append(url)
+            item = seq.pop(0)
+            if item == 429:
+                raise urllib.error.HTTPError(url, 429, "Too Many Requests", {"x-rate-limit-reset": str(int(time.time()) + 1)},
+                                             io.BytesIO(b'{"errors":[{"code":88,"message":"Rate limit exceeded"}]}'))
+            return Reply(item)
+        return op
+    saved = x.open_url, x.budget, x.save_conf
+    x.budget = x.Budget(sleep=lambda t: None, rand=lambda: 0.0)
+    x.save_conf = lambda c: None
+    try:
+        conf["x"].update(pace="jd", paused_until=0, locked=False)
+        x.open_url = fake_open([429, b'{"data": {"ok": 1}}'])
+        assert x.request(conf, "https://x.com/i/api/graphql/q/UserMedia?v", "UserMedia") == {"data": {"ok": 1}} and len(calls) == 2
+        assert not x.paused(conf)
+        x.open_url = fake_open([429, 429])
+        try:
+            x.request(conf, "https://x.com/i/api/graphql/q/UserMedia?v", "UserMedia")
+            raise AssertionError("second 429 must pause")
+        except x.Paused:
+            assert conf["x"]["paused_until"] > time.time()
+        conf["x"].update(pace="careful", paused_until=0)
+        calls.clear()
+        x.open_url = fake_open([429])
+        try:
+            x.request(conf, "https://x.com/i/api/graphql/q/UserMedia?v", "UserMedia")
+            raise AssertionError("careful 429 must pause")
+        except x.Paused:
+            assert len(calls) == 1
+    finally:
+        x.open_url, x.budget, x.save_conf = saved
+    conf["x"].update(paused_until=0, pace="jd")
+
+    # bulk: handle + following + followers, deduped, alt excluded, caps, lock mid-run -> continue where it stopped
+    accts = {"main": ("1", [("2", "f2"), ("3", "f3"), ("4242", "alt")], [("3", "f3"), ("5", "w5"), ("6", "w6")])}
+    pages = {"1": [["101", "102"], ["103"]], "2": [["201"]], "3": [], "5": "protected", "6": [["601", "602", "603"]]}
+    gql_calls, state_box = [], {}
+
+    def fake_gql(conf, state, op, v):
+        gql_calls.append((op, v.get("userId") or v.get("screen_name"), v.get("cursor")))
+        if op == "UserByScreenName":
+            return {"data": {"user": {"result": {"__typename": "User", "rest_id": "1", "core": {"screen_name": "main"}}}}}
+        if op in ("Following", "Followers"):
+            lst = accts["main"][1 if op == "Following" else 2]
+            return {"x": [{"itemType": "TimelineUser", "user_results": {"result": {"__typename": "User", "rest_id": i, "core": {"screen_name": h}}}}
+                          for i, h in lst]}
+        uid, cur = v["userId"], int(v.get("cursor") or 0)
+        if pages[uid] == "protected":
+            raise RuntimeError("X: protected")
+        if uid == "6" and state_box.get("lock_once"):
+            state_box["lock_once"] = False
+            raise x.Paused("locked")
+        pg = pages[uid][cur] if cur < len(pages[uid]) else []
+        entries = [{"__typename": "Tweet", "rest_id": t, "core": {"user_results": {"result": {"__typename": "User", "rest_id": uid, "core": {"screen_name": "u" + uid}}}},
+                    "legacy": {"id_str": t, "extended_entities": {"media": [{"type": "photo", "media_url_https": f"https://pbs.twimg.com/media/{t}.jpg"}]}}} for t in pg]
+        nxt = [{"cursorType": "Bottom", "value": str(cur + 1)}] if cur + 1 < len(pages[uid]) else []
+        return {"data": entries + nxt}
+    got_files = []
+    fake_dl = lambda p, root, q, cancel=None: (got_files.append((q, p["id"])), (1, 0))[1]  # noqa: E731
+    with tempfile.TemporaryDirectory() as tmp:
+        orig = x.STATE_PATH, x.gql
+        x.STATE_PATH, x.gql = Path(tmp) / "x_state.json", fake_gql
+        try:
+            st = x.load_state()
+            q = x.bulk_plan(conf, st, "@main", following_max=10, followers_max=2)
+            assert [a["handle"] for a in q] == ["main", "f2", "f3", "w5"], q  # alt dropped, f3 once, followers capped at 2
+            st["bulk"]["accounts"].append({"id": "6", "handle": "w6"})
+            state_box["lock_once"] = True
+            try:
+                x.bulk_run(conf, st, tmp, threading.Event(), download=fake_dl)
+                raise AssertionError("the lock must stop the run")
+            except x.Paused:
+                pass
+            b = x.load_state()["bulk"]
+            assert b["i"] == 4 and not b["finished"] and b["stats"]["new"] == 4, b  # main(3) + f2(1); f3 empty; w5 skipped
+            done_pages = len([c for c in gql_calls if c[0] == "UserMedia"])
+            st2 = x.load_state()
+            b = x.bulk_run(conf, st2, tmp, threading.Event(), download=fake_dl)
+            assert b["finished"] and b["stats"]["new"] == 7 and b["stats"]["posts"] == 7
+            assert [c for c in gql_calls if c[0] == "UserMedia"][done_pages:] == [("UserMedia", "6", None)]  # no page read twice
+            assert sorted(got_files) == sorted([("main", "101"), ("main", "102"), ("main", "103"), ("f2", "201"),
+                                                ("w6", "601"), ("w6", "602"), ("w6", "603")])
+            st3 = x.load_state()  # max posts per account
+            x.bulk_plan(conf, st3, "main", max_posts=2)
+            got_files.clear()
+            assert x.bulk_run(conf, st3, tmp, threading.Event(), download=fake_dl)["stats"]["posts"] == 2 and len(got_files) == 2
+        finally:
+            x.STATE_PATH, x.gql = orig

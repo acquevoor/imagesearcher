@@ -1,7 +1,9 @@
 """X (Twitter), opt-in and read-only: an alt account's pasted session cookies read the internal GraphQL API the
 web client uses. Ring 1 = the accounts your main follows (read from its public following list), ring 2 = the
-accounts at least MIN_OVERLAP of them follow. Every request goes through one slow, randomized budget, and any
-rate-limit or account warning pauses all X traffic (see Budget / pause_for)."""
+accounts at least MIN_OVERLAP of them follow; plus bulk downloads of one @handle (and optionally its following /
+followers). Every request goes through one budget (Budget): "jd" pace goes about as fast as X allows, like
+JDownloader (waits only when X's rate-limit headers say a limit is used up); "careful" is slow and capped.
+Lock / suspension replies stop all X traffic until Resume."""
 import json
 import os
 import random
@@ -10,25 +12,31 @@ import threading
 import time
 import urllib.error
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 
-from .core import CONF_PATH, CONF_LOCK, Source, http, log, make_post, save_conf
+from .core import CONF_PATH, CONF_LOCK, Source, download_post, http, log, make_post, open_url, save_conf
 
 BEARER = ("AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D"
           "1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA")  # the public token of X's own web client
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0"
 GQL = "https://x.com/i/api/graphql/"
-OPS = ("UserByScreenName", "Following", "UserTweets", "UserMedia")
+OPS = ("UserByScreenName", "Following", "Followers", "UserTweets", "UserMedia")
 # Used only when reading the current ones from x.com's main.js fails; X rotates them every few weeks.
 # ponytail: stale fallbacks just fail with a clear error, the main.js read is what keeps this working
 FALLBACK_QIDS = {"UserByScreenName": "x3RLKWW1Tl7JgU7YtGxuzw", "Following": "zx6e-TLzRkeDO_a7p4b3JQ",
-                 "UserTweets": "bbmLh6qwlhCgVTDO4R9ngA", "UserMedia": "WJhR3BD7MuJyTjd6Qhh6qA"}
+                 "Followers": "oQWxG6XdR5SPvMBsPiKUPQ", "UserTweets": "bbmLh6qwlhCgVTDO4R9ngA",
+                 "UserMedia": "WJhR3BD7MuJyTjd6Qhh6qA"}
 
-GAP, JITTER, HOURLY = 15.0, 10.0, 150  # seconds between requests (+ random 0..JITTER), requests per hour
+PACES = {"jd": "JDownloader (fast)", "careful": "Careful (slow)"}
+JD_GAP, JD_JITTER = 1.0, 0.5  # jd pace: seconds between requests; X's own rate-limit headers do the rest
+JD_429_WAIT = 900  # a 429 without a reset time: wait 15 min
+GAP, JITTER, HOURLY = 15.0, 10.0, 150  # careful pace: seconds between requests (+ random 0..JITTER), requests per hour
 MAX_PAUSE_MIN = 360
 MIN_OVERLAP, RING2_MAX, RING2_DEPTH = 3, 150, 400  # ring 2: followed by >= 3 follows, top 150, first 400 of each list
 REBUILD_DAYS, BATCH, KEEP_POSTS = 7, 40, 3000
 STATE_PATH = CONF_PATH.with_name("x_state.json")
-NOT_SET = "X: paste the alt account's auth_token and ct0 cookies and your main @handle in ⚙ Settings"
+NOT_SET = "X: not logged in. Copy the alt account's x.com cookies (Flag Cookies extension) and press 📋 Paste cookies"
+NO_SEED = "X: Timeline / Discover need your main @handle in ⚙ Settings (its following list is read)"
 
 
 class Paused(RuntimeError):
@@ -41,28 +49,57 @@ STOP = threading.Event()  # set on quit: wakes sleeping requests so the app can 
 # ---------- the request budget ----------
 
 class Budget:
-    """One request at a time, GAP + random(0..JITTER) seconds apart, at most HOURLY per rolling hour.
-    The lock is held while waiting, so callers queue up in order instead of bursting."""
+    """One request at a time; the lock is held while waiting, so callers queue up in order instead of bursting.
+    careful: GAP + random(0..JITTER) s apart, at most HOURLY per rolling hour.
+    jd: JD_GAP + random(0..JD_JITTER) s apart, and a request to an operation whose X limit is used up
+    (x-rate-limit-remaining <= 1) waits until that limit's reset time."""
 
     def __init__(self, clock=time.time, sleep=None, rand=random.random):
         self.clock, self.rand, self.lock = clock, rand, threading.Lock()
         self.sleep = sleep or (lambda s: STOP.wait(s))
         self.last, self.stamps = 0.0, []
+        self.limits = {}  # operation -> (remaining, reset epoch) from X's last reply
 
-    def next_ok(self):
+    def next_ok(self, pace="careful", op=None):
         now = self.clock()
         self.stamps = [t for t in self.stamps if now - t < 3600]
+        if pace == "jd":
+            t = max(now, self.last + JD_GAP + JD_JITTER * self.rand())
+            rem, reset = self.limits.get(op, (None, 0))
+            if rem is not None and rem <= 1 and reset > now:
+                t = max(t, reset + 2)
+            return t
         t = max(now, self.last + GAP + JITTER * self.rand())
         if len(self.stamps) >= HOURLY:
             t = max(t, self.stamps[0] + 3600)
         return t
 
-    def wait(self, check=lambda: None):
+    def note(self, op, hdrs):
+        """Remember X's rate-limit headers for op."""
+        try:
+            self.limits[op] = (int(hdrs.get("x-rate-limit-remaining")), int(hdrs.get("x-rate-limit-reset")))
+        except (TypeError, ValueError, AttributeError):
+            pass
+
+    def status(self, pace):
+        """Short text for the banner."""
+        if pace != "jd":
+            return f"careful pace, {self.left()} of {HOURLY} requests left this hour"
+        now = self.clock()
+        out = [f"{op} limit used up, continuing {time.strftime('%H:%M', time.localtime(reset))}"
+               for op, (rem, reset) in self.limits.items() if rem <= 1 and reset > now]
+        return "JDownloader pace" + (" · " + " · ".join(out) if out else "".join(
+            f" · {op} {rem} left" for op, (rem, reset) in sorted(self.limits.items()) if reset > now)[:200])
+
+    def wait(self, check=lambda: None, pace="careful", op=None):
         with self.lock:
             check()
-            t = self.next_ok()
-            if t - self.clock() > 0.5:
-                log.info("x: next request in %.0f s (%d of %d left this hour)", t - self.clock(), self.left(), HOURLY)
+            t = self.next_ok(pace, op)
+            wait = t - self.clock()
+            if pace == "jd" and wait > 5:
+                log.info("x: X's limit for %s is used up, waiting %.0f s (until %s)", op, wait, time.strftime("%H:%M:%S", time.localtime(t)))
+            elif pace != "jd" and wait > 0.5:
+                log.info("x: next request in %.0f s (%d of %d left this hour)", wait, self.left(), HOURLY)
             if t > self.clock():
                 self.sleep(t - self.clock())
             if STOP.is_set():
@@ -125,8 +162,9 @@ def check(conf):
 
 
 def ready(conf):
+    """Logged in (cookies present). The main @handle is only needed for Timeline / Discover (seed)."""
     c = conf["x"]
-    return bool(c["enabled"] and c["auth_token"] and c["ct0"] and c["seed_handle"])
+    return bool(c["enabled"] and c["auth_token"] and c["ct0"])
 
 
 # ---------- talking to X ----------
@@ -158,18 +196,36 @@ def error_kind(status, body):
     return "other", msg
 
 
-def request(conf, url):
-    """One budgeted GET to X -> parsed JSON. Warnings pause X; nothing is ever retried automatically."""
-    budget.wait(lambda: check(conf))
-    try:
-        body = http(url, headers=headers(conf))
-    except urllib.error.HTTPError as e:
-        kind, msg = error_kind(e.code, e.read())
-        log.warning("x: request refused: HTTP %s, %s (%s)", e.code, kind, msg)
-        raise handle(conf, kind, msg) from None
-    except OSError as e:
-        log.warning("x: request failed: %s: %s", type(e).__name__, e)
-        raise RuntimeError(f"X: network error: {e}") from None
+def pace(conf):
+    return conf["x"].get("pace") if conf["x"].get("pace") in PACES else "jd"
+
+
+def request(conf, url, op=None):
+    """One budgeted GET to X -> parsed JSON. Lock / suspension replies stop X until Resume. A rate limit:
+    jd pace waits until X's reset time and tries once more (a second one pauses); careful pace pauses."""
+    p = pace(conf)
+    for attempt in (1, 2):
+        budget.wait(lambda: check(conf), p, op)
+        try:
+            with open_url(url, headers=headers(conf)) as r:
+                body = r.read()
+                budget.note(op, r.headers)
+            break
+        except urllib.error.HTTPError as e:
+            budget.note(op, e.headers)
+            kind, msg = error_kind(e.code, e.read())
+            log.warning("x: request refused: HTTP %s, %s (%s)", e.code, kind, msg)
+            if kind == "pause" and p == "jd" and attempt == 1:
+                reset = budget.limits.get(op, (0, 0))[1]
+                until = reset if reset > time.time() else time.time() + JD_429_WAIT
+                budget.limits[op] = (0, until)  # the next wait() sleeps until then
+                log.warning("x: rate limit on %s, waiting until %s then trying once more (JDownloader pace)",
+                            op, time.strftime("%H:%M:%S", time.localtime(until)))
+                continue
+            raise handle(conf, kind, msg) from None
+        except OSError as e:
+            log.warning("x: request failed: %s: %s", type(e).__name__, e)
+            raise RuntimeError(f"X: network error: {e}") from None
     try:
         data = json.loads(body)
     except ValueError:
@@ -215,11 +271,11 @@ def ops(conf, state):
     found = {}
     log.info("x: reading the current query ids from x.com's main.js (once a day)")
     try:
-        budget.wait(lambda: check(conf))
+        budget.wait(lambda: check(conf), pace(conf), "main.js")
         page = http("https://x.com/", headers={"User-Agent": UA, "Cookie": headers(conf)["Cookie"]}).decode(errors="replace")
         m = MAIN_JS.search(page)
         if m:
-            budget.wait(lambda: check(conf))
+            budget.wait(lambda: check(conf), pace(conf), "main.js")
             found = parse_ops(http(m[0], headers={"User-Agent": UA}).decode(errors="replace"))
             log.info("x: main.js %s: found %s", m[0].rsplit("/", 1)[-1], ", ".join(f"{op}={o['qid']} ({len(o['features'])} features)"
                                                                                 for op, o in found.items()) or "none of the needed operations")
@@ -266,7 +322,7 @@ def gql_once(conf, state, op, variables):
         "variables": json.dumps(variables, separators=(",", ":")),
         "features": json.dumps(o["features"], separators=(",", ":")),
         "fieldToggles": json.dumps(o["toggles"], separators=(",", ":"))})
-    return request(conf, url)
+    return request(conf, url, op)
 
 
 # ---------- reading replies (walked, not path-matched: X moves fields around often) ----------
@@ -289,7 +345,11 @@ def user_of(d):
         return None
     core, legacy = d.get("core") or {}, d.get("legacy") or {}
     handle = core.get("screen_name") or legacy.get("screen_name")
-    return {"id": d["rest_id"], "handle": handle, "name": core.get("name") or legacy.get("name") or handle} if handle else None
+    if not handle:
+        return None
+    return {"id": d["rest_id"], "handle": handle, "name": core.get("name") or legacy.get("name") or handle,
+            "following": legacy.get("friends_count", 0), "followers": legacy.get("followers_count", 0),
+            "media": legacy.get("media_count", 0)}
 
 
 def users(data):
@@ -381,15 +441,20 @@ def user(conf, state, handle):
 
 def following(conf, state, uid, limit=None, pages=50, progress=None):
     """The accounts uid follows, newest-followed first, up to limit (None = all, bounded by pages)."""
+    return follow_list(conf, state, uid, "Following", limit, pages, progress)
+
+
+def follow_list(conf, state, uid, op="Following", limit=None, pages=50, progress=None):
+    """op "Following" = who uid follows, "Followers" = who follows uid; newest first, up to limit."""
     out, cursor = [], None
     for _ in range(pages):
         v = {"userId": uid, "count": 100, "includePromotedContent": False}
         if cursor:
             v["cursor"] = cursor
-        got, nxt = users(gql(conf, state, "Following", v))
+        got, nxt = users(gql(conf, state, op, v))
         new = [u for u in got if u["id"] not in {o["id"] for o in out}]
         out += new
-        log.info("x: following of %s: +%d accounts (%d so far)%s", uid, len(new), len(out), "" if nxt else ", no more pages")
+        log.info("x: %s of %s: +%d accounts (%d so far)%s", op.lower(), uid, len(new), len(out), "" if nxt else ", no more pages")
         if progress:
             progress(len(out))
         if not new or not nxt or nxt == cursor or (limit and len(out) >= limit):
@@ -432,7 +497,7 @@ class MediaSource(Source):
 # ---------- state: x_state.json next to config.json (0600, written atomically) ----------
 
 STATE_DEFAULTS = {"seed": {}, "follows": [], "graph": {"built": 0, "next": 0, "counts": {}, "users": {}, "ring2": []},
-                  "checked": {}, "newest": {}, "posts": [], "ops": {}}
+                  "checked": {}, "newest": {}, "posts": [], "ops": {}, "bulk": None}
 STATE_LOCK = threading.RLock()
 
 
@@ -458,6 +523,8 @@ def save_state(st):
 def seed(conf, state, refresh=False):
     """Ring 1: the main's following list (read by the alt). Re-read with the graph, or when the handle changed."""
     h = conf["x"]["seed_handle"].lstrip("@").lower()
+    if not h:
+        raise RuntimeError(NO_SEED)
     if not refresh and state["seed"].get("handle") == h and state["follows"]:
         return state["follows"]
     log.info("x: reading @%s's following list (ring 1)", h)
@@ -488,7 +555,7 @@ def build_ring2(conf, state, progress=lambda done, total: None):
         follows = seed(conf, state, refresh=True)
         g.update(counts={}, users={})
     follows = state["follows"]
-    exclude = {state["seed"]["id"], *(f["id"] for f in follows)}
+    exclude = {state["seed"]["id"], conf["x"].get("alt_id", ""), *(f["id"] for f in follows)}
     log.info("x: graph: reading the follows of %d accounts, starting at #%d", len(follows), g["next"] + 1)
     for i in range(g["next"], len(follows)):
         progress(i, len(follows))
@@ -539,3 +606,154 @@ def check_batch(conf, state, accounts, ring, n=BATCH, got=lambda posts: None):
             got(new)
     log.info("x: checked %d ring-%d accounts, %d new", min(n, len(accounts)), ring, total)
     return total
+
+
+# ---------- cookie login (JDownloader style: copy the cookies with the Flag Cookies extension, paste) ----------
+
+X_DOMAINS = ("x.com", "twitter.com")
+
+
+def _json_in(text):
+    """The JSON in text, also when a heading line or other text surrounds it; None if there is none."""
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    starts = [i for i in (text.find("["), text.find("{")) if i >= 0]
+    end = max(text.rfind("]"), text.rfind("}"))
+    if starts and end > min(starts):
+        try:
+            return json.loads(text[min(starts):end + 1])
+        except ValueError:
+            return None
+    return None
+
+
+def parse_cookies(text):
+    """Pasted cookies -> {name: value} for x.com / twitter.com. Takes the Flag Cookies / EditThisCookie /
+    Cookie-Editor JSON export (a list of {name, value, domain}, maybe wrapped in an object), Netscape
+    cookies.txt lines, or a raw "Cookie: a=b; c=d" header. Cookies of other domains are dropped."""
+    text = (text or "").strip()
+    ok = lambda dom: not dom or any(dom.lstrip(".").endswith(d) for d in X_DOMAINS)  # noqa: E731
+    data = _json_in(text)
+    if isinstance(data, dict):
+        inner = next((data[k] for k in ("cookies", "Cookies", "data") if isinstance(data.get(k), list)), None)
+        if inner is None:  # a plain {name: value} object
+            return {k: str(v) for k, v in data.items() if isinstance(v, (str, int))}
+        data = inner
+    if isinstance(data, list):
+        return {str(c["name"]): str(c.get("value", "")) for c in data
+                if isinstance(c, dict) and "name" in c and ok(str(c.get("domain", "")))}
+    out = {}
+    for line in text.splitlines():  # Netscape cookies.txt
+        line = line.strip()
+        if line.startswith("#HttpOnly_"):
+            line = line[len("#HttpOnly_"):]
+        f = line.split("\t")
+        if len(f) >= 7 and not line.startswith("#") and ok(f[0]):
+            out[f[5]] = f[6]
+    if out:
+        return out
+    header = re.sub(r"^\s*cookie\s*:\s*", "", text, flags=re.I)  # a raw Cookie header
+    for part in header.split(";"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def cookie_login(conf, text):
+    """Store auth_token + ct0 (+ the alt's own id from twid) from pasted cookies -> summary text."""
+    cookies = parse_cookies(text)
+    missing = [n for n in ("auth_token", "ct0") if not cookies.get(n)]
+    if missing:
+        found = ", ".join(sorted(cookies)[:12]) or "nothing that looks like cookies"
+        raise RuntimeError(f"no {' / '.join(missing)} in the pasted cookies (logged in on x.com in that browser?). Found: {found}")
+    m = re.search(r"u=(\d+)", urllib.parse.unquote(cookies.get("twid", "")))
+    with CONF_LOCK:
+        conf["x"].update(auth_token=cookies["auth_token"], ct0=cookies["ct0"], alt_id=m[1] if m else "")
+    summary = "auth_token, ct0" + (f", alt account id {m[1]}" if m else "")
+    log.info("x: cookies pasted: %s (%d cookies in the paste)", summary, len(cookies))
+    return summary
+
+
+# ---------- bulk: one @handle's media tab, optionally with its following / followers ----------
+
+def bulk_plan(conf, state, handle, following_max=0, followers_max=0, max_posts=0):
+    """Resolve the accounts of a bulk run into state["bulk"] (the handle first, then its following and its
+    followers, each capped, deduped, never the alt) -> the queue."""
+    me = user(conf, state, handle)
+    accts = [me]
+    if following_max:
+        accts += follow_list(conf, state, me["id"], "Following", limit=following_max)
+    if followers_max:
+        accts += follow_list(conf, state, me["id"], "Followers", limit=followers_max)
+    alt, seen, queue = conf["x"].get("alt_id", ""), set(), []
+    for a in accts:
+        if a["id"] not in seen and a["id"] != alt:
+            seen.add(a["id"])
+            queue.append({"id": a["id"], "handle": a["handle"]})
+    state["bulk"] = {"handle": me["handle"], "accounts": queue, "i": 0, "cursor": None, "done_posts": 0, "max_posts": max_posts,
+                     "acct": {"new": 0, "skip": 0, "fail": 0}, "stats": {"new": 0, "skip": 0, "fail": 0, "posts": 0},
+                     "started": time.time(), "finished": False}
+    save_state(state)
+    log.info("x: bulk @%s planned: %d accounts (the handle%s%s), %s", me["handle"], len(queue),
+             f" + following, max {following_max}" if following_max else "",
+             f" + followers, max {followers_max}" if followers_max else "", f"max {max_posts} posts each" if max_posts else "all posts")
+    return queue
+
+
+def bulk_run(conf, state, root, cancel, progress=lambda b: None, download=download_post, workers=3):
+    """Work through state["bulk"]: each account's media tab page by page, files `workers` at a time into
+    <root>/x/<account>/. Saved after every page, so it continues where it stopped (quit, lock, Cancel)."""
+    b = state["bulk"]
+    while b["i"] < len(b["accounts"]) and not cancel.is_set():
+        a = b["accounts"][b["i"]]
+        v = {"userId": a["id"], "count": 40, "includePromotedContent": False, "withClientEventToken": False,
+             "withBirdwatchNotes": False, "withVoice": True}
+        if b["cursor"]:
+            v["cursor"] = b["cursor"]
+        try:
+            posts, cursor, _ = tweets(gql(conf, state, "UserMedia", v))
+        except Paused:
+            raise
+        except RuntimeError as e:  # protected / deleted / suspended account: skip it
+            log.warning("x: bulk: skipping @%s (%s)", a["handle"], e)
+            b.update(i=b["i"] + 1, cursor=None, done_posts=0, acct={"new": 0, "skip": 0, "fail": 0})
+            save_state(state)
+            continue
+        if b["max_posts"]:
+            posts = posts[:max(0, b["max_posts"] - b["done_posts"])]
+        with ThreadPoolExecutor(workers) as ex:
+            for f in [ex.submit(download, p, root, a["handle"], cancel) for p in posts]:
+                try:
+                    n, sk = f.result()
+                    b["acct"]["new"] += n
+                    b["acct"]["skip"] += sk
+                except Exception as e:
+                    b["acct"]["fail"] += 1
+                    log.warning("x: bulk: a file of @%s failed: %s", a["handle"], e)
+        if cancel.is_set():  # stopped mid-page: this page runs again next time (files already on disk are skipped)
+            break
+        b["done_posts"] += len(posts)
+        log.info("x: bulk @%s (account %d/%d): page of %d posts, %d posts so far", a["handle"], b["i"] + 1, len(b["accounts"]),
+                 len(posts), b["done_posts"])
+        if not posts or not cursor or cursor == b["cursor"] or (b["max_posts"] and b["done_posts"] >= b["max_posts"]):
+            st = b["acct"]
+            log.info("x: bulk: @%s done: %d posts, %d files new, %d already had, %d failed", a["handle"], b["done_posts"],
+                     st["new"], st["skip"], st["fail"])
+            for k in ("new", "skip", "fail"):
+                b["stats"][k] += st[k]
+            b["stats"]["posts"] += b["done_posts"]
+            b.update(i=b["i"] + 1, cursor=None, done_posts=0, acct={"new": 0, "skip": 0, "fail": 0})
+        else:
+            b["cursor"] = cursor
+        save_state(state)
+        progress(json.loads(json.dumps(b)))
+    if b["i"] >= len(b["accounts"]) and not b["finished"]:
+        b["finished"] = True
+        save_state(state)
+        st = b["stats"]
+        log.info("x: bulk @%s finished: %d accounts, %d posts, %d files new, %d already had, %d failed (%.0f min)", b["handle"],
+                 len(b["accounts"]), st["posts"], st["new"], st["skip"], st["fail"], (time.time() - b["started"]) / 60)
+    return b

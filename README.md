@@ -82,20 +82,30 @@ Includes a desktop entry. Without Nix: `python imagesearcher.py` with PySide6 in
 - A Pixiv tag's right-click menu has **Open on boorus**: the booru tag whose wiki lists that Japanese name.
 
 ## X (opt-in)
-Off by default; switch it on in ⚙ (then restart). It's read-only and slow on purpose.
+Off by default: switch it on in ⚙, then restart. The app never posts, follows, likes or bookmarks anything.
 
 > **Use a separate (alt) account.** Reading X this way goes through the same internal API x.com itself uses,
-> which is against X's terms. Too much of it can get the account rate-limited or locked. The app never posts,
-> follows, likes or bookmarks anything.
+> which is against X's terms and can get the account rate-limited or locked.
 
-- **Timeline** shows images, GIFs and videos (own posts and retweets) from the accounts your **main** account follows. The alt reads your main's following list, so the alt follows no one and your main never logs in here. Your main's following list must be public.
-- **Discover** shows the accounts that at least 3 of your follows follow, up to 150 of them, best first. **Build graph** reads the first 400 follows of each of your follows. That takes hours at the safe pace, can be paused and resumed, and runs at most once a week.
+**Log in like JDownloader**
+1. Install the **Flag Cookies** browser extension (JDownloader's cookie exporter). Exports from EditThisCookie, Cookie-Editor or a `cookies.txt` file work too.
+2. Open x.com logged in as the alt, then use Flag Cookies to copy the cookies.
+3. Press **📋 Paste cookies**, either on the X banner or in ⚙ → X login. Then press **Test login** to make one request and confirm it works.
+
+The cookies are stored only in your config file (mode 0600) and are never logged. If you log out of x.com in that browser, the session ends; copy and paste the cookies again.
+
+**What's in the X section**
+- **⬇ Bulk @handle…** downloads every photo, video and GIF from an account's media tab into `<download dir>/x/<account>/`. Tick **include the accounts it follows** and/or **include its followers** to add those accounts too, each with its own limit, plus an optional limit on posts per account. Runs pick up where they stopped: after quitting, a lock or **Cancel bulk**, press **Continue bulk** on the banner. Files already on disk are skipped. Files download 3 at a time.
+- **Timeline** shows media from the accounts your **main** account follows. Set your main @handle in ⚙; its following list must be public.
+- **Discover** shows accounts that at least 3 of your follows also follow, up to 150 of them. **Build graph** reads the first 400 follows of each of your follows.
 - **@handle** in the search box opens that account's media tab.
-- **Pace**: one request at a time, about 15–25 s apart, at most 150 an hour. Each refresh checks the 40 accounts that were checked longest ago.
-- **Warnings**: a rate-limit reply pauses all X traffic for the time set in ⚙ (randomized, up to 6 h). A "locked" or "suspended" reply pauses it until you press **Resume X**.
-- **Sensitive media** gets `rating:e`, so blacklist `rating:e` to hide it. Turn on "Display media that may contain sensitive content" in the alt's X settings.
 
-**Cookies:** log the alt in on x.com in your browser. In Firefox, press F12 → Storage → Cookies → https://x.com; in Chrome, F12 → Application → Cookies. Copy the values of `auth_token` and `ct0` into ⚙, along with your main's @handle. Logging out of x.com in that browser ends the session, so copy fresh cookies after that. They're stored only in your config file (mode 0600) and never logged.
+**Pace** (⚙ → X pace)
+- **JDownloader (fast)**, the default: requests go about a second apart. When X's own rate limit runs out (its `x-rate-limit-*` headers say so), the app waits until X resets it and carries on. A 429 reply also waits for the reset and is retried once.
+- **Careful (slow)**: requests go 15–25 s apart, at most 150 an hour. A rate-limit reply pauses X for the time you set (randomized, up to 6 h).
+- At either pace, a "locked" or "suspended" reply stops all X traffic until you press **Resume X**.
+
+**Sensitive media** gets `rating:e`, so blacklist `rating:e` to hide it. Turn on "Display media that may contain sensitive content" in the alt's X settings.
 
 ## Everything else
 

@@ -1,16 +1,20 @@
 """The X section (opt-in): Timeline = media from the accounts your main follows, Discover = media from the accounts
-many of them follow, artist tabs, Favorites. Read-only; every request waits its turn in x.budget, and a banner
-shows what X traffic is doing (or why it's paused)."""
+many of them follow, artist tabs, Favorites, and bulk downloads of one @handle (optionally with its following /
+followers). Read-only; every request waits its turn in x.budget, and a banner shows what X traffic is doing."""
 import html
+import threading
 import time
 import webbrowser
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QListWidgetItem, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidgetItem,
+    QPushButton, QSpinBox, QVBoxLayout, QWidget,
+)
 
 from . import x
-from .core import allowed, log, run, to_ui
+from .core import allowed, dest, log, run, save_conf, to_ui
 from .widgets import Feed, Grid, Section, rich_label
 
 
@@ -19,19 +23,27 @@ class XSection(Section):
 
     def __init__(self, main):
         super().__init__(main, "@handle   Enter = open that account's media tab")
-        self.state, self.job, self.graph_note, self.last_state = x.load_state(), "", "", ""
+        self.state, self.job, self.graph_note, self.last_state, self.bulk_note = x.load_state(), "", "", "", ""
+        self.bulk_cancel = threading.Event()
         st = self.state
         log.info("x: state loaded: %d follows, ring 2 = %d accounts%s, %d cached posts, %d accounts checked before",
                  len(st["follows"]), len(st["graph"]["ring2"]), f" (graph paused at {st['graph']['next']})" if st["graph"]["next"] else "",
                  len(st["posts"]), len(st["checked"]))
         self.bar.addWidget(self.q, 1)
-        for w in (QPushButton("Open", clicked=lambda: self.search()), self.saved, self.star):
+        for w in (QPushButton("Open", clicked=lambda: self.search()), self.saved, self.star,
+                  QPushButton("⬇ Bulk @handle…", toolTip="Download all media of one account (optionally its following / followers too)",
+                              clicked=lambda: self.bulk_dialog())):
             self.bar.addWidget(w)
         self.banner = QLabel(wordWrap=True)
         self.resume_btn = QPushButton("Resume X", clicked=self.resume)
+        self.paste_btn = QPushButton("📋 Paste cookies", toolTip="Log in: the alt's x.com cookies, copied with the Flag Cookies "
+                                     "browser extension (like JDownloader)", clicked=self.paste_cookies)
+        self.continue_btn = QPushButton("", clicked=self.continue_bulk)
+        self.cancel_btn = QPushButton("Cancel bulk", clicked=self.cancel_bulk)
         row = QHBoxLayout()
         row.addWidget(self.banner, 1)
-        row.addWidget(self.resume_btn)
+        for w in (self.paste_btn, self.continue_btn, self.cancel_btn, self.resume_btn):
+            row.addWidget(w)
         self.layout().insertLayout(1, row)
         self.timeline, self.discover = Ring(self, 1), Ring(self, 2)
         self.add_fixed(self.timeline, "Timeline")
@@ -50,9 +62,17 @@ class XSection(Section):
         elif why:
             text = why
         else:
-            text = f"X: {x.budget.left()} of {x.HOURLY} requests left this hour" + (f" · {self.job}" if self.job else " · idle")
-        if self.graph_note:
-            text += f" · {self.graph_note}"
+            text = f"X: {x.budget.status(x.pace(self.conf))}" + (f" · {self.job}" if self.job else " · idle")
+        for note in (self.graph_note, self.bulk_note):
+            if note:
+                text += f" · {note}"
+        b = self.state.get("bulk")
+        self.paste_btn.setVisible(not x.ready(self.conf))
+        self.cancel_btn.setVisible(self.job.startswith("bulk"))
+        resumable = bool(b and not b["finished"] and not self.job)
+        self.continue_btn.setVisible(resumable)
+        if resumable:
+            self.continue_btn.setText(f"Continue bulk @{b['handle']} ({b['i']}/{len(b['accounts'])} accounts)")
         kind = "not set up" if not x.ready(self.conf) else why or (self.job or "idle")
         if kind != self.last_state:  # the banner's meaning changed (not just the request counter)
             log.info("x: status: %s", text)
@@ -91,6 +111,67 @@ class XSection(Section):
 
     def resume(self):
         x.resume(self.conf)
+        self.update_banner()
+
+    def paste_cookies(self):
+        """JDownloader-style login: the cookies from the clipboard straight into the settings."""
+        try:
+            summary = x.cookie_login(self.conf, QApplication.clipboard().text())
+        except RuntimeError as e:
+            log.warning("x: paste cookies: %s", e)
+            return self.main.statusBar().showMessage(f"X: {e}")
+        save_conf(self.conf)
+        self.main.statusBar().showMessage(f"X: logged in with the pasted cookies ({summary})")
+        self.update_banner()
+
+    # --- bulk: one @handle (+ optionally its following / followers) ---
+    def bulk_dialog(self, handle=None):
+        f = self.current_feed()
+        d = BulkDialog(self, handle if handle is not None else (getattr(f, "query", "") or "").lstrip("@"))
+        if d.exec():
+            h, fol, fwr, mx = d.values()
+            if h:
+                self.start_bulk(h, fol, fwr, mx)
+
+    def start_bulk(self, handle, following_max, followers_max, max_posts):
+        conf, state, root = self.conf, self.state, self.conf["download_dir"]
+        self.bulk_cancel.clear()
+
+        def work():
+            x.bulk_plan(conf, state, handle, following_max, followers_max, max_posts)
+            return x.bulk_run(conf, state, root, self.bulk_cancel, self.bulk_progress)
+        self.start_job(f"bulk @{handle}", work, self.bulk_done)
+
+    def continue_bulk(self):
+        b, conf, state, root = self.state["bulk"], self.conf, self.state, self.conf["download_dir"]
+        self.bulk_cancel.clear()
+        log.info("x: continuing bulk @%s at account %d/%d", b["handle"], b["i"] + 1, len(b["accounts"]))
+        self.start_job(f"bulk @{b['handle']} (continued)", lambda: x.bulk_run(conf, state, root, self.bulk_cancel, self.bulk_progress),
+                       self.bulk_done)
+
+    def cancel_bulk(self):
+        log.info("x: bulk cancel pressed")
+        self.bulk_cancel.set()
+        self.bulk_note = "bulk: stopping after the current files…"
+        self.update_banner()
+
+    def bulk_progress(self, b):
+        def show(*_):
+            st, a = b["stats"], b["acct"]
+            cur = b["accounts"][b["i"]]["handle"] if b["i"] < len(b["accounts"]) else "done"
+            self.bulk_note = (f"bulk @{b['handle']}: account {min(b['i'] + 1, len(b['accounts']))}/{len(b['accounts'])} (@{cur}), "
+                              f"{st['new'] + a['new']} files new, {st['skip'] + a['skip']} already had, {st['fail'] + a['fail']} failed")
+            self.main.statusBar().showMessage(self.bulk_note)
+            self.update_banner()
+        to_ui(show)
+
+    def bulk_done(self, b, err):
+        self.bulk_note = ""
+        if b:
+            st = b["stats"]
+            self.main.statusBar().showMessage(f"X bulk @{b['handle']} {'finished' if b['finished'] else 'stopped'}: "
+                                              f"{st['new']} files new, {st['skip']} already had, {st['fail']} failed"
+                                              + ("" if b["finished"] else " — Continue picks it up"))
         self.update_banner()
 
     # --- tabs ---
@@ -132,6 +213,8 @@ class XSection(Section):
         out = [(f"👤 @{p['handle']}", lambda: self.open_artist(handle=p["handle"], uid=p["user"]))] if p.get("handle") else []
         if p.get("rt_by"):
             out.append((f"🔁 via @{p['rt_by']}", lambda: self.open_artist(handle=p["rt_by"])))
+        if p.get("handle"):
+            out.append(("⬇ Bulk this account…", lambda: self.bulk_dialog(p["handle"])))
         return out + [("Open on X", lambda: webbrowser.open(p["page"]))]
 
     def tag_actions(self, tag, cat):
@@ -261,3 +344,43 @@ class Ring(QWidget):
                 sec.main.statusBar().showMessage(f"X: graph built, {len(ring2)} accounts to discover")
         if sec.start_job("building the follow graph", lambda: x.build_ring2(conf, state, progress), done):
             self.graph_btn.setEnabled(False)
+
+
+class BulkDialog(QDialog):
+    """Bulk one @handle: its media tab, optionally the accounts it follows and/or its followers (each capped)."""
+
+    def __init__(self, section, handle=""):
+        super().__init__(section)
+        self.setWindowTitle("X bulk download")
+        self.section = section
+        form = QFormLayout(self)
+        self.handle = QLineEdit(handle, placeholderText="@handle")
+        self.fol = QCheckBox("include the accounts it follows, at most")
+        self.fol_n = QSpinBox(minimum=1, maximum=100_000, value=200)
+        self.fwr = QCheckBox("include its followers, at most")
+        self.fwr_n = QSpinBox(minimum=1, maximum=100_000, value=200)
+        self.max = QSpinBox(minimum=0, maximum=1_000_000, singleStep=100, specialValueText="all", value=0)
+        self.where = QLabel(wordWrap=True)
+        form.addRow("Account", self.handle)
+        for cb, n in ((self.fol, self.fol_n), (self.fwr, self.fwr_n)):
+            row = QHBoxLayout()
+            row.addWidget(cb)
+            row.addWidget(n)
+            row.addStretch()
+            form.addRow(row)
+        form.addRow("Max posts per account", self.max)
+        form.addRow(self.where)
+        form.addRow(QLabel(f"Pace: {x.PACES[x.pace(section.conf)]} (⚙). Own media only (the media tab). Resumable: "
+                           "a quit, lock or Cancel can be continued later; files already on disk are skipped.", wordWrap=True))
+        form.addRow(QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, accepted=self.accept, rejected=self.reject))
+        self.handle.textChanged.connect(self.preview)
+        self.preview()
+
+    def preview(self):
+        h = self.handle.text().strip().lstrip("@") or "handle"
+        sample = {"site": "x", "id": "1234567890", "files": ["https://pbs.twimg.com/media/A.jpg?name=orig"]}
+        self.where.setText(f"Saved as {dest(self.section.conf['download_dir'], sample, 0, h)} (one folder per account)")
+
+    def values(self):
+        return (self.handle.text().strip().lstrip("@"), self.fol_n.value() if self.fol.isChecked() else 0,
+                self.fwr_n.value() if self.fwr.isChecked() else 0, self.max.value())

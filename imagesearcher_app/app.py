@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog,
     QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -49,7 +49,7 @@ def log_changes(before, after, path=""):
 
 def x_missing(conf):
     c = conf["x"]
-    return [n for n, v in (("auth_token", c["auth_token"]), ("ct0", c["ct0"]), ("main account", c["seed_handle"])) if not v]
+    return [n for n, v in (("auth_token", c["auth_token"]), ("ct0", c["ct0"]), ("main account (Timeline/Discover)", c["seed_handle"])) if not v]
 
 
 class Settings(QDialog):
@@ -80,22 +80,68 @@ class Settings(QDialog):
         # X: opt-in, off by default
         xc = c["x"]
         self.x_on = QCheckBox("Enable the X section (restart to show/hide it)", checked=xc["enabled"])
-        form.addRow(QLabel("<b>X</b> — read-only, very slow on purpose. Use an <b>alt</b> account: reading X this way is against "
-                           "X's terms and can get that account locked. See the README (“X (opt-in)”) for the cookies.", wordWrap=True))
+        form.addRow(QLabel("<b>X</b> — read-only. Use an <b>alt</b> account: reading X this way is against X's terms and can get "
+                           "that account locked. Log in like JDownloader: on x.com (logged in as the alt) copy the cookies with the "
+                           "<b>Flag Cookies</b> browser extension, then press 📋 Paste cookies.", wordWrap=True))
         form.addRow(self.x_on)
-        self.x_token = QLineEdit(xc["auth_token"], echoMode=QLineEdit.PasswordEchoOnEdit, placeholderText="alt account's auth_token cookie")
-        self.x_ct0 = QLineEdit(xc["ct0"], echoMode=QLineEdit.PasswordEchoOnEdit, placeholderText="alt account's ct0 cookie")
-        self.x_seed = QLineEdit(xc["seed_handle"], placeholderText="@your_main (its following list must be public)")
+        self.x_alt = xc["alt_id"]
+        self.x_paste = QPushButton("📋 Paste cookies", toolTip="Reads auth_token and ct0 from the clipboard (Flag Cookies / "
+                                   "EditThisCookie / Cookie-Editor JSON, cookies.txt or a Cookie header)", clicked=self.paste_x)
+        self.x_test = QPushButton("Test login", toolTip="One request to X with these cookies", clicked=self.test_x)
+        self.x_note = QLabel(wordWrap=True)
+        row = QHBoxLayout()
+        for w in (self.x_paste, self.x_test):
+            row.addWidget(w)
+        row.addWidget(self.x_note, 1)
+        form.addRow("X login", row)
+        self.x_token = QLineEdit(xc["auth_token"], echoMode=QLineEdit.PasswordEchoOnEdit, placeholderText="filled by Paste cookies")
+        self.x_ct0 = QLineEdit(xc["ct0"], echoMode=QLineEdit.PasswordEchoOnEdit, placeholderText="filled by Paste cookies")
+        self.x_seed = QLineEdit(xc["seed_handle"], placeholderText="@your_main, for Timeline / Discover (its following list must be public)")
+        self.x_pace = QComboBox()
+        for k, label in x.PACES.items():
+            self.x_pace.addItem(label, k)
+        self.x_pace.setCurrentIndex(self.x_pace.findData(x.pace(c)))
         self.x_pause = QSpinBox(minimum=15, maximum=x.MAX_PAUSE_MIN, singleStep=15, suffix=" min", value=xc["pause_min"])
         self.x_rand = QCheckBox("randomize (±25%)", checked=xc["pause_random"])
         form.addRow("X auth_token", self.x_token)
         form.addRow("X ct0", self.x_ct0)
         form.addRow("Main account", self.x_seed)
+        form.addRow("X pace", self.x_pace)
         row = QHBoxLayout()
         row.addWidget(self.x_pause)
         row.addWidget(self.x_rand)
-        form.addRow("Pause X on a warning for", row)
+        form.addRow("Careful pace: pause on a rate limit for", row)
         form.addRow(QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, accepted=self.accept, rejected=self.reject))
+
+    def paste_x(self):
+        tmp = {"x": {}}
+        try:
+            summary = x.cookie_login(tmp, QApplication.clipboard().text())
+        except RuntimeError as e:
+            log.warning("x: paste cookies: %s", e)
+            return self.x_note.setText(f"<i>{e}</i>")
+        self.x_token.setText(tmp["x"]["auth_token"])
+        self.x_ct0.setText(tmp["x"]["ct0"])
+        self.x_alt = tmp["x"]["alt_id"] or self.x_alt
+        self.x_on.setChecked(True)
+        self.x_note.setText(f"Got {summary}. Press Save (and Test login if you like).")
+
+    def test_x(self):
+        """One UserByScreenName request with the cookies in the fields (saved or not)."""
+        tmp = json.loads(json.dumps(self.parent().conf))
+        tmp["x"].update(enabled=True, auth_token=self.x_token.text().strip(), ct0=self.x_ct0.text().strip(),
+                        pace=self.x_pace.currentData(), alt_id=self.x_alt)
+        who = self.x_seed.text().strip().lstrip("@") or "X"
+        self.x_note.setText("Testing…")
+        self.x_test.setEnabled(False)
+        log.info("x: test login (looking up @%s)", who)
+
+        def done(u, e):
+            self.x_test.setEnabled(True)
+            msg = f"✗ {e}" if e else f"✓ logged in. @{u['handle']} follows {u['following']:,} and has {u['followers']:,} followers"
+            log.info("x: test login: %s", msg)
+            self.x_note.setText(msg)
+        run(lambda: x.user(tmp, x.load_state(), who), done, "x")
 
     def fetch_keys(self):
         """The key fetcher; afterwards the token field shows what it saved, so Save can't put the old one back."""
@@ -115,7 +161,8 @@ class Settings(QDialog):
         conf["blacklist"] = sorted(set(self.bl.toPlainText().lower().split()))
         conf["download_dir"], conf["limit"] = self.dir.text().strip(), self.limit.value()
         conf["x"].update(enabled=self.x_on.isChecked(), auth_token=self.x_token.text().strip(), ct0=self.x_ct0.text().strip(),
-                         seed_handle=self.x_seed.text().strip().lstrip("@"), pause_min=self.x_pause.value(), pause_random=self.x_rand.isChecked())
+                         seed_handle=self.x_seed.text().strip().lstrip("@"), pause_min=self.x_pause.value(), pause_random=self.x_rand.isChecked(),
+                         pace=self.x_pace.currentData(), alt_id=self.x_alt)
 
 
 class Main(QMainWindow):
