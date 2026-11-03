@@ -154,6 +154,11 @@ Browse 4chan's **/trash/**, **/d/** and **/h/**, live and through the archives. 
 - Every action is logged in the console window. Tick **History** to also keep one log file per day in the `history` folder next to `imagesearcher.py` (📂 opens it). Keys and tokens are never logged.
 - Config is `~/.config/imagesearcher/config.json` (mode 0600, holds your keys). A config from version 1 is converted on first start; the old file is kept as `config.v1.json`.
 
+## Linux AppImage (no install)
+Download `imagesearcher-x86_64.AppImage` from the repo's **Releases** page, make it executable (`chmod +x imagesearcher-x86_64.AppImage`, or tick "Allow executing" in your file manager's Properties) and run it. It brings its own Python and Qt, so nothing else needs to be installed. Settings, history and downloads go to the same places in your home folder as with the other versions.
+
+To build it yourself, run `appimage/build.sh` (on NixOS: `steam-run appimage/build.sh`). It downloads a portable Python (python-build-standalone), PySide6 from pip and the official appimagetool. On GitHub, **Actions → AppImage → Run workflow** builds it, and pushing a `v*` tag builds it and attaches it to that release.
+
 ## Windows (no terminal needed)
 1. Install Python from https://www.python.org/downloads/ . In the installer, tick **"Add python.exe to PATH"** and click *Install Now*.
 2. On this GitHub page click the green **Code** button → **Download ZIP**, then right-click the ZIP → **Extract All**.

@@ -1,0 +1,30 @@
+# Builds imagesearcher-x86_64.AppImage (appimage/build.sh: portable CPython + PySide6 + the app, packed by the
+# official appimagetool). Runs by hand (Actions -> AppImage -> Run workflow) or for a pushed v* tag, which also
+# attaches the AppImage to that tag's GitHub Release.
+name: AppImage
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: bash appimage/build.sh
+      - name: Smoke test (offline self-check inside the AppImage)
+        run: APPIMAGE_EXTRACT_AND_RUN=1 ./imagesearcher-x86_64.AppImage --selftest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: imagesearcher-x86_64.AppImage
+          path: imagesearcher-x86_64.AppImage
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Linux AppImage: download, chmod +x, run."
+          gh release upload "$GITHUB_REF_NAME" imagesearcher-x86_64.AppImage --clobber
