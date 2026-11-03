@@ -137,17 +137,25 @@ class XSection(Section):
         conf, state, root = self.conf, self.state, self.conf["download_dir"]
         self.bulk_cancel.clear()
 
+        view = self.bulk_view(handle)
+
         def work():
             x.bulk_plan(conf, state, handle, following_max, followers_max, max_posts)
-            return x.bulk_run(conf, state, root, self.bulk_cancel, self.bulk_progress)
-        self.start_job(f"bulk @{handle}", work, self.bulk_done)
+            return x.bulk_run(conf, state, root, self.bulk_cancel, self.bulk_progress, on_file=view.landed)
+        if not self.start_job(f"bulk @{handle}", work, self.bulk_done):
+            view.status.setText("Not started, see the banner.")
 
     def continue_bulk(self):
         b, conf, state, root = self.state["bulk"], self.conf, self.state, self.conf["download_dir"]
         self.bulk_cancel.clear()
         log.info("x: continuing bulk @%s at account %d/%d", b["handle"], b["i"] + 1, len(b["accounts"]))
-        self.start_job(f"bulk @{b['handle']} (continued)", lambda: x.bulk_run(conf, state, root, self.bulk_cancel, self.bulk_progress),
-                       self.bulk_done)
+        view = self.bulk_view(b["handle"])
+        self.start_job(f"bulk @{b['handle']} (continued)",
+                       lambda: x.bulk_run(conf, state, root, self.bulk_cancel, self.bulk_progress, on_file=view.landed), self.bulk_done)
+
+    def bulk_view(self, handle):
+        """The live tab of a bulk run: each image shows up the moment its file is saved."""
+        return self.open_tab(f"bulk:{handle.lower()}", f"⬇ @{handle}", lambda: BulkView(self, handle))
 
     def cancel_bulk(self):
         log.info("x: bulk cancel pressed")
@@ -267,7 +275,10 @@ class Ring(QWidget):
         if not self.started:
             self.started = True
             self.show_cached()
-            if self.accounts() or self.ring == 1:
+            if self.ring == 1 and not self.section.conf["x"]["seed_handle"]:
+                log.info("x: %s: no main @handle set, nothing checked", self.label)
+                self.status.setText(x.NO_SEED)
+            elif self.accounts() or self.ring == 1:
                 log.info("x: %s opened for the first time this session: one automatic check", self.label)
                 self.check()
             else:
@@ -384,3 +395,41 @@ class BulkDialog(QDialog):
     def values(self):
         return (self.handle.text().strip().lstrip("@"), self.fol_n.value() if self.fol.isChecked() else 0,
                 self.fwr_n.value() if self.fwr.isChecked() else 0, self.max.value())
+
+
+class BulkView(QWidget):
+    """A bulk run's images, added as their files land on disk (shown from those files, no second download)."""
+
+    def __init__(self, section, handle):
+        super().__init__()
+        self.section, self.label = section, f"x bulk {handle}"
+        self.grid = Grid(section.open_image)
+        self.grid.feed = self  # Viewer: download label; more() is a no-op
+        self.status = QLabel(f"Bulk @{handle}: images appear here as they are saved.")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.status)
+        lay.addWidget(self.grid, 1)
+
+    def more(self):
+        pass
+
+    def landed(self, post, account):
+        """Called on the bulk worker: hand the post to the UI thread."""
+        to_ui(lambda *_: self.add(post, account))
+
+    def add(self, post, account):
+        root = self.section.conf["download_dir"]
+        paths = [dest(root, post, i, account) for i in range(len(post["files"]))]
+        if not all(p.exists() for p in paths):
+            return
+        uris = [p.as_uri() for p in paths]
+        # ponytail: the tile points at the saved files (thumbnail, viewer, mpv, favorite all read them locally);
+        # videos keep X's poster image as their still
+        local = {**post, "files": uris, "samples": post["samples"] if post["video"] else uris,
+                 "thumb": post["thumb"] if post["video"] else uris[0], "account": account}
+        try:
+            self.grid.add([local])
+        except RuntimeError:  # tab closed while the run goes on
+            return
+        self.status.setText(f"{self.grid.count()} images saved so far (newest last) · in {paths[0].parent.parent}")

@@ -95,7 +95,7 @@ Off by default: switch it on in ⚙, then restart. The app never posts, follows,
 The cookies are stored only in your config file (mode 0600) and are never logged. If you log out of x.com in that browser, the session ends; copy and paste the cookies again.
 
 **What's in the X section**
-- **⬇ Bulk @handle…** downloads every photo, video and GIF from an account's media tab into `<download dir>/x/<account>/`. Tick **include the accounts it follows** and/or **include its followers** to add those accounts too, each with its own limit, plus an optional limit on posts per account. Runs pick up where they stopped: after quitting, a lock or **Cancel bulk**, press **Continue bulk** on the banner. Files already on disk are skipped. Files download 3 at a time.
+- **⬇ Bulk @handle…** downloads every photo, video and GIF from an account's media tab into `<download dir>/x/<account>/`. Tick **include the accounts it follows** and/or **include its followers** to add those accounts too, each with its own limit, plus an optional limit on posts per account. Each image appears in a live **⬇ @handle** tab the moment its file is saved, so you can open it while the run goes on. Runs pick up where they stopped: after quitting, a lock or **Cancel bulk**, press **Continue bulk** on the banner. Files already on disk are skipped. Files download 3 at a time.
 - **Timeline** shows media from the accounts your **main** account follows. Set your main @handle in ⚙; its following list must be public.
 - **Discover** shows accounts that at least 3 of your follows also follow, up to 150 of them. **Build graph** reads the first 400 follows of each of your follows.
 - **@handle** in the search box opens that account's media tab.

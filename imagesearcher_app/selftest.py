@@ -463,8 +463,9 @@ def xtest2():
             b = x.load_state()["bulk"]
             assert b["i"] == 4 and not b["finished"] and b["stats"]["new"] == 4, b  # main(3) + f2(1); f3 empty; w5 skipped
             done_pages = len([c for c in gql_calls if c[0] == "UserMedia"])
-            st2 = x.load_state()
-            b = x.bulk_run(conf, st2, tmp, threading.Event(), download=fake_dl)
+            st2, shown = x.load_state(), []
+            b = x.bulk_run(conf, st2, tmp, threading.Event(), download=fake_dl, on_file=lambda p, acct: shown.append((acct, p["id"])))
+            assert shown == [("w6", "601"), ("w6", "602"), ("w6", "603")] or sorted(shown) == [("w6", "601"), ("w6", "602"), ("w6", "603")]
             assert b["finished"] and b["stats"]["new"] == 7 and b["stats"]["posts"] == 7
             assert [c for c in gql_calls if c[0] == "UserMedia"][done_pages:] == [("UserMedia", "6", None)]  # no page read twice
             assert sorted(got_files) == sorted([("main", "101"), ("main", "102"), ("main", "103"), ("f2", "201"),

@@ -12,7 +12,7 @@ import threading
 import time
 import urllib.error
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .core import CONF_PATH, CONF_LOCK, Source, download_post, http, log, make_post, open_url, save_conf
 
@@ -703,9 +703,11 @@ def bulk_plan(conf, state, handle, following_max=0, followers_max=0, max_posts=0
     return queue
 
 
-def bulk_run(conf, state, root, cancel, progress=lambda b: None, download=download_post, workers=3):
+def bulk_run(conf, state, root, cancel, progress=lambda b: None, download=download_post, workers=3,
+             on_file=lambda post, account: None):
     """Work through state["bulk"]: each account's media tab page by page, files `workers` at a time into
-    <root>/x/<account>/. Saved after every page, so it continues where it stopped (quit, lock, Cancel)."""
+    <root>/x/<account>/. on_file(post, account) fires the moment a post's files are on disk (new or already
+    there), so the UI can show it right away. Saved after every page, so it continues where it stopped."""
     b = state["bulk"]
     while b["i"] < len(b["accounts"]) and not cancel.is_set():
         a = b["accounts"][b["i"]]
@@ -725,11 +727,14 @@ def bulk_run(conf, state, root, cancel, progress=lambda b: None, download=downlo
         if b["max_posts"]:
             posts = posts[:max(0, b["max_posts"] - b["done_posts"])]
         with ThreadPoolExecutor(workers) as ex:
-            for f in [ex.submit(download, p, root, a["handle"], cancel) for p in posts]:
+            futs = {ex.submit(download, p, root, a["handle"], cancel): p for p in posts}
+            for f in as_completed(futs):  # in the order they finish, not the order they started
                 try:
                     n, sk = f.result()
                     b["acct"]["new"] += n
                     b["acct"]["skip"] += sk
+                    if n + sk:
+                        on_file(futs[f], a["handle"])
                 except Exception as e:
                     b["acct"]["fail"] += 1
                     log.warning("x: bulk: a file of @%s failed: %s", a["handle"], e)
