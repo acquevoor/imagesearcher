@@ -58,6 +58,10 @@ DEFAULTS = {
     "x": {"enabled": False, "auth_token": "", "ct0": "", "seed_handle": "", "pause_min": 120, "pause_random": True,
           "paused_until": 0, "locked": False, "reason": "", "pace": "jd", "alt_id": ""},
     "x_saved": [],
+    # Imageboard: opt-in; board -> FoolFuuka archive host; cf: Cloudflare passes (host -> cookie + user agent)
+    "ib": {"enabled": False, "boards": {"trash": "desuarchive.org", "d": "desuarchive.org", "h": "archiveofsins.com"},
+           "cf": {}, "watch": {}, "names": "original"},
+    "ib_saved": [],
 }
 CONF_LOCK = threading.RLock()  # workers add to pixiv_map / refresh the Pixiv token while the UI saves
 
@@ -214,8 +218,8 @@ def qs(**params):
 
 
 # ---------- posts ----------
-LABELS = {"pixiv": "PX", "x": "X"}  # site id -> short tile label, filled from the booru registry
-NAMES = {"pixiv": "Pixiv", "x": "X"}
+LABELS = {"pixiv": "PX", "x": "X", "ib": "4ch"}  # site id -> short tile label, filled from the booru registry
+NAMES = {"pixiv": "Pixiv", "x": "X", "ib": "Imageboard"}
 
 
 def make_post(site, pid, thumb, files, samples, tags, rating, page, w=0, h=0, **extra):

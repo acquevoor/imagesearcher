@@ -1,12 +1,14 @@
 """Offline self-check (`imagesearcher.py --selftest`, also the Nix flake check): parsers fed with trimmed real replies."""
+import io
 import json
 import logging
 import tempfile
 import threading
 import time
+import urllib.error
 from pathlib import Path
 
-from . import boorus, bridge, core, keys, pixiv, x
+from . import boorus, bridge, core, imageboard as ib, keys, pixiv, x
 from .booru_ui import follow_srcs
 from .core import CACHE_MARK, cached, clear_cache, dest, fold, interleave, local, move_favorite, preset, rating_ok, allowed
 
@@ -211,6 +213,7 @@ def selftest():
         lines = (Path(tmp) / f"{time.strftime('%Y-%m-%d')}.txt").read_text().splitlines()
         assert [ln.split(" ", 2)[2] for ln in lines] == ["one", "two"], lines  # same day appends, toggle off stops
     xtest()
+    ibtest()
     print("selftest ok")
 
 
@@ -476,3 +479,100 @@ def xtest2():
             assert x.bulk_run(conf, st3, tmp, threading.Event(), download=fake_dl)["stats"]["posts"] == 2 and len(got_files) == 2
         finally:
             x.STATE_PATH, x.gql = orig
+
+
+def ibtest():
+    """Imageboard: archive (FoolFuuka) and live 4chan parsing from trimmed real replies, md5 dedupe across them,
+    live -> archive fallback for a dead thread, search params, original-filename saving, watcher, Cloudflare."""
+    conf = {"ib": json.loads(json.dumps(core.DEFAULTS["ib"])), "blacklist": [], "download_dir": ""}
+    board = {"name": "Hentai/Alternative", "shortname": "d"}
+    ff_op = {"num": "11597785", "subnum": "0", "thread_num": "11597785", "op": "1", "title": "Elf thread", "board": board,
+             "comment_sanitized": "Elves.\nPost elves.", "nreplies": None, "media": {
+                 "media_filename": "01.jpg", "media_hash": "b6DPU6/e3wSlsnc2bmiLCA==", "media_size": "242560", "media_w": "1280",
+                 "media_h": "1810", "banned": "0", "media_link": "https://desu-usergeneratedcontent.xyz/d/image/1793/17/1793172802742.jpg",
+                 "thumb_link": "https://desu-usergeneratedcontent.xyz/d/thumb/1793/17/1793172802742s.jpg"}}
+    ff_reply = {**ff_op, "num": "11597790", "op": "0", "title": None, "comment_sanitized": "nice", "media": {**ff_op["media"],
+                "media_filename": "02.jpg", "media_hash": "l2BocYT12kUHK1JOvu14iA==", "media_size": "189704"}}
+    ff_text = {**ff_op, "num": "11597791", "op": "0", "media": None}
+    ff_ghost = {**ff_reply, "num": "11597790", "subnum": "1"}
+    p = ib.ff_post(ff_op, "desuarchive.org")
+    assert p["id"] == "d-11597785" and p["filename"] == "01.jpg" and p["md5"] == "6fa0cf53afdedf04a5b277366e688b08" and p["op"]
+    assert p["tags"] == ["/d/", "thread:d/11597785", "file:01.jpg"] and p["rating"] == "e" and p["size"] == 242560 and (p["w"], p["h"]) == (1280, 1810)
+    assert p["page"] == "https://desuarchive.org/d/thread/11597785/#11597785" and p["title"] == "Elf thread" and p["source"] == "desuarchive.org"
+    assert ib.ff_post(ff_text, "h") is None and ib.ff_post(ff_ghost, "h") is None
+    live_op = {"no": 11597785, "resto": 0, "sub": "Elf &amp; co", "com": "Elves.<br>Post <span class=\"quote\">&gt;elves</span>.",
+               "tim": 1793172802742249, "ext": ".jpg", "filename": "01", "md5": "b6DPU6/e3wSlsnc2bmiLCA==", "fsize": 242560, "w": 1280,
+               "h": 1810, "replies": 152, "images": 84}
+    lp = ib.live_post(live_op, "d", 11597785)
+    assert lp["files"] == ["https://i.4cdn.org/d/1793172802742249.jpg"] and lp["thumb"] == "https://i.4cdn.org/d/1793172802742249s.jpg"
+    assert lp["comment"] == "Elves.\nPost >elves." and lp["subject"] == "Elf & co" and lp["md5"] == p["md5"] and lp["filename"] == "01.jpg"
+    assert ib.tile_text(lp) == "Elf & co\n152r 84i" and ib.live_post({"no": 5, "com": "text only"}, "d", 5) is None
+    seen = {}
+    assert fold(seen, lp) and fold(seen, {**p, "site": "ib2"}) and len(seen) == 1  # same image from 4chan and the archive shows once
+    assert ib.search_params(["d", "trash"], 2, text="elf", images_only=True) == {"boards": "d.trash", "page": 2, "text": "elf", "filter": "text", "order": "desc"}
+    srcs = ib.search_sources(conf, ["d", "trash", "h"], text="elf")
+    assert sorted((s.host, tuple(s.boards)) for s in srcs) == [("archiveofsins.com", ("h",)), ("desuarchive.org", ("d", "trash"))]
+
+    replies = {"posts": {"11597790": ff_reply, "11597791": ff_text}, "op": ff_op}
+    orig = ib.get
+    calls = []
+
+    def fake_get(conf, url, host=""):
+        calls.append(url)
+        if "a.4cdn.org" in url:
+            return None  # 404: the thread died
+        return {"11597785": replies}
+    ib.get = fake_get
+    try:
+        posts, info = ib.thread_posts(conf, "d", "11597785")
+        assert [x["num"] for x in posts] == ["11597785", "11597790"] and not info["alive"] and info["source"] == "desuarchive.org"
+        assert calls[0].startswith("https://a.4cdn.org/d/thread/11597785.json") and "desuarchive.org/_/api/chan/thread/" in calls[1]
+        ib.get = lambda conf, url, host="": {"posts": [live_op, {"no": 11597800, "resto": 11597785, "com": "no image"},
+                                                       {**live_op, "no": 11597801, "resto": 11597785, "tim": 2, "md5": "", "filename": "x"}]}
+        posts, info = ib.thread_posts(conf, "d", "11597785")
+        assert [x["num"] for x in posts] == ["11597785", "11597801"] and info["alive"] and info["replies"] == 152
+        saved = ib.save_conf
+        ib.save_conf = lambda c: None
+        try:
+            ib.watch(conf, "d", "11597785", "Elf thread")
+            new = dict(ib.check_watched(conf))["d/11597785"]
+            assert len(new) == 2 and conf["ib"]["watch"]["d/11597785"]["new"] == 2
+            ib.mark_seen(conf, "d/11597785", new)
+            assert ib.check_watched(conf) == [("d/11597785", [])]
+        finally:
+            ib.save_conf = saved
+    finally:
+        ib.get = orig
+
+    with tempfile.TemporaryDirectory() as tmp:  # original filenames: same size = have it, other size = "(no)"
+        class R(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        orig_open = ib.open_url
+        ib.open_url = lambda url, timeout=30, headers=None: R(b"x" * 242560)
+        try:
+            assert ib.save(conf, p, tmp, "11597785 - Elf thread") == (1, 0)
+            f = Path(tmp, "imageboard", "d", "11597785 - Elf thread", "01.jpg")
+            assert f.exists() and f.stat().st_size == 242560
+            assert ib.save(conf, p, tmp, "11597785 - Elf thread") == (0, 1)
+            other = {**p, "num": "11597999", "id": "d-11597999", "size": 1000}
+            assert ib.target(conf, other, tmp, "11597785 - Elf thread").name == "01 (11597999).jpg"
+            conf["ib"]["names"] = "timestamp"
+            assert ib.target(conf, lp, tmp, "x").name == "1793172802742249.jpg"
+            conf["ib"]["names"] = "original"
+
+            def cf(url, timeout=30, headers=None):
+                raise urllib.error.HTTPError(url, 403, "Forbidden", {}, io.BytesIO(b"<title>Just a moment...</title>"))
+            ib.open_url = cf
+            try:
+                ib.get(conf, "https://archived.moe/_/api/chan/index/?board=h&page=1", "archived.moe")
+                raise AssertionError("Cloudflare must be explained")
+            except RuntimeError as e:
+                assert "Pass Cloudflare" in str(e) and "archived.moe" in str(e)
+            conf["ib"]["cf"]["archived.moe"] = {"cookie": "CF", "ua": "UA/1"}
+            assert ib.headers(conf, "archived.moe") == {"Cookie": "cf_clearance=CF", "User-Agent": "UA/1"} and ib.headers(conf, "desuarchive.org") == {}
+        finally:
+            ib.open_url = orig_open

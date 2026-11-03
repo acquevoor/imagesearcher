@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from . import core, pixiv, x
+from . import core, imageboard, pixiv, x
 from .booru_ui import BooruSection
 from .keys import KeysDialog, missing
 from .core import (
@@ -23,6 +23,7 @@ from .core import (
     same, save_conf, set_history, to_ui,
 )
 from .pixiv_ui import PixivSection
+from .ib_ui import IBSection, pass_cloudflare
 from .x_ui import XSection
 
 
@@ -111,6 +112,26 @@ class Settings(QDialog):
         row.addWidget(self.x_pause)
         row.addWidget(self.x_rand)
         form.addRow("Careful pace: pause on a rate limit for", row)
+        # Imageboard: opt-in
+        ic = c["ib"]
+        self.ib_on = QCheckBox("Enable the Imageboard section (restart to show/hide it)", checked=ic["enabled"])
+        form.addRow(QLabel("<b>Imageboard</b> — 4chan boards through the archives (desuarchive, archiveofsins, archived.moe) and live "
+                           "4chan. NSFW boards by default.", wordWrap=True))
+        form.addRow(self.ib_on)
+        self.ib_boards = QPlainTextEdit("\n".join(f"{b} {h}" for b, h in ic["boards"].items()), maximumHeight=80,
+                                        placeholderText="one per line: board archive-host   e.g.  d desuarchive.org")
+        self.ib_boards.setToolTip("Archives: " + ", ".join(imageboard.ARCHIVES) + ". archived.moe needs Pass Cloudflare.")
+        form.addRow("Boards → archive", self.ib_boards)
+        self.ib_names = QComboBox()
+        self.ib_names.addItem("Original filename", "original")
+        self.ib_names.addItem("4chan timestamp", "timestamp")
+        self.ib_names.setCurrentIndex(max(0, self.ib_names.findData(ic.get("names", "original"))))
+        cf = QPushButton("☁ Pass Cloudflare…", toolTip="archived.moe, or an archive whose search is behind Cloudflare",
+                         clicked=lambda: pass_cloudflare(self, self.parent().conf))
+        row = QHBoxLayout()
+        row.addWidget(self.ib_names)
+        row.addWidget(cf)
+        form.addRow("Save files as", row)
         form.addRow(QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, accepted=self.accept, rejected=self.reject))
 
     def paste_x(self):
@@ -163,6 +184,9 @@ class Settings(QDialog):
         conf["x"].update(enabled=self.x_on.isChecked(), auth_token=self.x_token.text().strip(), ct0=self.x_ct0.text().strip(),
                          seed_handle=self.x_seed.text().strip().lstrip("@"), pause_min=self.x_pause.value(), pause_random=self.x_rand.isChecked(),
                          pace=self.x_pace.currentData(), alt_id=self.x_alt)
+        pairs = [ln.split() for ln in self.ib_boards.toPlainText().splitlines() if len(ln.split()) == 2]
+        conf["ib"].update(enabled=self.ib_on.isChecked(), names=self.ib_names.currentData(),
+                          boards={b.strip("/").lower(): h.lower() for b, h in pairs} or conf["ib"]["boards"])
 
 
 class Main(QMainWindow):
@@ -177,7 +201,9 @@ class Main(QMainWindow):
         self.stack = QStackedWidget()
         self.boorus, self.pixiv = BooruSection(self), PixivSection(self)
         self.x = XSection(self) if self.conf["x"]["enabled"] else None
-        secs = [(self.boorus, "Boorus", "Ctrl+1"), (self.pixiv, "Pixiv", "Ctrl+2")] + ([(self.x, "X", "Ctrl+3")] if self.x else [])
+        self.ib = IBSection(self) if self.conf["ib"]["enabled"] else None
+        secs = [(self.boorus, "Boorus", "Ctrl+1"), (self.pixiv, "Pixiv", "Ctrl+2")] + ([(self.x, "X", "Ctrl+3")] if self.x else []) \
+            + ([(self.ib, "Imageboard", "Ctrl+4")] if self.ib else [])
         for i, (sec, name, key) in enumerate(secs):
             b = QPushButton(f"{name}", checkable=True, toolTip=key, minimumWidth=110)
             self.switch.addButton(b, i)
@@ -203,14 +229,14 @@ class Main(QMainWindow):
         self.statusBar().addPermanentWidget(self.cancel_btn)
         self.last_status = ""
         self.statusBar().messageChanged.connect(self.log_status)  # everything shown down there is in the log too
-        self.show_section({"pixiv": self.pixiv, "x": self.x}.get(self.conf["section"]) or self.boorus)
+        self.show_section({"pixiv": self.pixiv, "x": self.x, "ib": self.ib}.get(self.conf["section"]) or self.boorus)
 
     def show_section(self, sec):
         if self.stack.currentWidget() is not sec:
             log.info("section -> %s", self.switch.button(self.stack.indexOf(sec)).text())
         self.stack.setCurrentWidget(sec)
         self.switch.button(self.stack.indexOf(sec)).setChecked(True)
-        self.conf["section"] = "pixiv" if sec is self.pixiv else "x" if sec is self.x else "boorus"
+        self.conf["section"] = {id(self.pixiv): "pixiv", id(self.x): "x", id(self.ib): "ib"}.get(id(sec), "boorus")
 
     def log_status(self, msg):
         if msg and msg != self.last_status and not msg.startswith("Loading page"):
@@ -240,7 +266,7 @@ class Main(QMainWindow):
             favs.insert(0, p)
             log.info("favorite %s #%s", p["site"], p["id"])
         save_conf(self.conf)
-        sec = {"pixiv": self.pixiv, "x": self.x}.get(p["site"], self.boorus)
+        sec = {"pixiv": self.pixiv, "x": self.x, "ib": self.ib}.get(p["site"], self.boorus)
         if sec:  # open image tabs keep their own post
             sec.refresh_favs()
         root, fav = self.conf["download_dir"], self.is_fav(p)
@@ -253,6 +279,8 @@ class Main(QMainWindow):
         self.statusBar().showMessage(f"Blacklisted '{tag}' (applies to new searches)")
 
     def save_post(self, p, root, label, cancel=None):
+        if p["site"] == "ib":  # original filenames, imageboard/<board>/<label>/
+            return imageboard.save(self.conf, p, root, label, cancel)
         if p.get("ugoira"):
             return pixiv.download_ugoira(self.conf, p, root, label)
         return download_post(p, root, label, cancel)
@@ -337,10 +365,10 @@ class Main(QMainWindow):
             save_conf(self.conf)
             self.boorus.reload_sites()  # posts-per-page lives in the engines
             log.info("settings saved")
-            restart = self.conf["x"]["enabled"] != bool(self.x)
+            restart = self.conf["x"]["enabled"] != bool(self.x) or self.conf["ib"]["enabled"] != bool(self.ib)
             if self.conf["x"]["enabled"] and (miss := x_missing(self.conf)):
                 log.warning("x: enabled but not set up, missing: %s", ", ".join(miss))
-            self.statusBar().showMessage("Settings saved" + ("  — restart the app to show/hide the X section" if restart else ""))
+            self.statusBar().showMessage("Settings saved" + ("  — restart the app to show/hide the X / Imageboard section" if restart else ""))
 
 
 def main():
@@ -371,6 +399,8 @@ def main():
     log.info("boorus on: %s; pixiv: %s; x: %s", ", ".join(b["name"] for b in c["boorus"] if b["on"]) or "none",
              "token set" if c["pixiv"]["refresh_token"] else "no token",
              "off" if not c["x"]["enabled"] else f"on, missing {', '.join(x_missing(c))}" if x_missing(c) else "on, set up")
+    log.info("imageboard: %s", "off" if not c["ib"]["enabled"] else
+             "on, " + ", ".join(f"/{b}/ via {h}" for b, h in c["ib"]["boards"].items()) + (f"; Cloudflare passed for {', '.join(c['ib']['cf'])}" if c["ib"]["cf"] else ""))
     w.show()
     if w.conf["keys_prompt"] and missing(w.conf):  # offered on every launch while a key is empty, unless switched off
         QTimer.singleShot(0, lambda: KeysDialog(w).show())

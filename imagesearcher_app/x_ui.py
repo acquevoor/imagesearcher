@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 
 from . import x
 from .core import allowed, dest, log, run, save_conf, to_ui
-from .widgets import Feed, Grid, Section, rich_label
+from .widgets import Feed, Grid, LiveBulk, Section, rich_label
 
 
 class XSection(Section):
@@ -141,7 +141,7 @@ class XSection(Section):
 
         def work():
             x.bulk_plan(conf, state, handle, following_max, followers_max, max_posts)
-            return x.bulk_run(conf, state, root, self.bulk_cancel, self.bulk_progress, on_file=view.landed)
+            return x.bulk_run(conf, state, root, self.bulk_cancel, self.bulk_progress, on_file=view.on_file)
         if not self.start_job(f"bulk @{handle}", work, self.bulk_done):
             view.status.setText("Not started, see the banner.")
 
@@ -151,11 +151,14 @@ class XSection(Section):
         log.info("x: continuing bulk @%s at account %d/%d", b["handle"], b["i"] + 1, len(b["accounts"]))
         view = self.bulk_view(b["handle"])
         self.start_job(f"bulk @{b['handle']} (continued)",
-                       lambda: x.bulk_run(conf, state, root, self.bulk_cancel, self.bulk_progress, on_file=view.landed), self.bulk_done)
+                       lambda: x.bulk_run(conf, state, root, self.bulk_cancel, self.bulk_progress, on_file=view.on_file), self.bulk_done)
 
     def bulk_view(self, handle):
         """The live tab of a bulk run: each image shows up the moment its file is saved."""
-        return self.open_tab(f"bulk:{handle.lower()}", f"⬇ @{handle}", lambda: BulkView(self, handle))
+        view = self.open_tab(f"bulk:{handle.lower()}", f"⬇ @{handle}", lambda: LiveBulk(self, f"x bulk {handle}", f"Bulk @{handle}"))
+        root = self.conf["download_dir"]
+        view.on_file = lambda p, acct: view.landed(p, [dest(root, p, i, acct) for i in range(len(p["files"]))])
+        return view
 
     def cancel_bulk(self):
         log.info("x: bulk cancel pressed")
@@ -396,40 +399,3 @@ class BulkDialog(QDialog):
         return (self.handle.text().strip().lstrip("@"), self.fol_n.value() if self.fol.isChecked() else 0,
                 self.fwr_n.value() if self.fwr.isChecked() else 0, self.max.value())
 
-
-class BulkView(QWidget):
-    """A bulk run's images, added as their files land on disk (shown from those files, no second download)."""
-
-    def __init__(self, section, handle):
-        super().__init__()
-        self.section, self.label = section, f"x bulk {handle}"
-        self.grid = Grid(section.open_image)
-        self.grid.feed = self  # Viewer: download label; more() is a no-op
-        self.status = QLabel(f"Bulk @{handle}: images appear here as they are saved.")
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.status)
-        lay.addWidget(self.grid, 1)
-
-    def more(self):
-        pass
-
-    def landed(self, post, account):
-        """Called on the bulk worker: hand the post to the UI thread."""
-        to_ui(lambda *_: self.add(post, account))
-
-    def add(self, post, account):
-        root = self.section.conf["download_dir"]
-        paths = [dest(root, post, i, account) for i in range(len(post["files"]))]
-        if not all(p.exists() for p in paths):
-            return
-        uris = [p.as_uri() for p in paths]
-        # ponytail: the tile points at the saved files (thumbnail, viewer, mpv, favorite all read them locally);
-        # videos keep X's poster image as their still
-        local = {**post, "files": uris, "samples": post["samples"] if post["video"] else uris,
-                 "thumb": post["thumb"] if post["video"] else uris[0], "account": account}
-        try:
-            self.grid.add([local])
-        except RuntimeError:  # tab closed while the run goes on
-            return
-        self.status.setText(f"{self.grid.count()} images saved so far (newest last) · in {paths[0].parent.parent}")

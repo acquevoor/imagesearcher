@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 from . import pixiv
 from .core import (
     CAT_COLOR, LABELS, NAMES, PIXIV_REFERER, THUMB, allowed, cached, fetch_all, fetch_file, fold, http, interleave, local, log,
-    run, same, save_conf,
+    run, same, save_conf, to_ui,
 )
 
 
@@ -654,3 +654,52 @@ class Section(QWidget):
     def tag_actions(self, tag, cat):
         """[(menu text, fn)] for a tag's right-click menu in an image tab"""
         return []
+
+
+class LiveBulk(QWidget):
+    """A bulk download's images, added the moment their files are saved (shown from those files: opening one
+    needs no second download). Workers call landed(post, paths); cancel (an Event) adds a Cancel button."""
+
+    def __init__(self, section, label, title, cancel=None):
+        super().__init__()
+        self.section, self.label, self.title, self.cancel = section, label, title, cancel
+        self.grid = Grid(section.open_image)
+        self.grid.feed = self  # Viewer: download label; more() is a no-op
+        self.status = QLabel(f"{title}: images appear here as they are saved.")
+        row = QHBoxLayout()
+        row.addWidget(self.status, 1)
+        if cancel is not None:
+            self.cancel_btn = QPushButton("Cancel", clicked=lambda: (cancel.set(), log.info("bulk '%s' cancel pressed", label),
+                                                                     self.status.setText(f"{title}: stopping after the current files…")))
+            row.addWidget(self.cancel_btn)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addLayout(row)
+        lay.addWidget(self.grid, 1)
+
+    def more(self):
+        pass
+
+    def landed(self, post, paths):
+        """From a worker thread: hand the saved post to the UI thread."""
+        to_ui(lambda *_: self.add(post, paths))
+
+    def add(self, post, paths):
+        paths = [Path(p) for p in paths]
+        if not paths or not all(p.exists() for p in paths):
+            return
+        uris = [p.as_uri() for p in paths]
+        # the tile points at the saved files (thumbnail, viewer, mpv, favorite all read them locally);
+        # videos keep the site's poster image as their still
+        local = {**post, "files": uris, "samples": post["samples"] if post["video"] else uris,
+                 "thumb": post["thumb"] if post["video"] else uris[0]}
+        try:
+            self.grid.add([local])
+        except RuntimeError:  # tab closed while the run goes on
+            return
+        self.status.setText(f"{self.title}: {self.grid.count()} saved so far (newest last) · in {paths[0].parent}")
+
+    def finished(self, text):
+        self.status.setText(f"{self.title}: {text}")
+        if self.cancel is not None:
+            self.cancel_btn.hide()

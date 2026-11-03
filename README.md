@@ -107,6 +107,17 @@ The cookies are stored only in your config file (mode 0600) and are never logged
 
 **Sensitive media** gets `rating:e`, so blacklist `rating:e` to hide it. Turn on "Display media that may contain sensitive content" in the alt's X settings.
 
+## Imageboard (opt-in)
+Browse 4chan's **/trash/**, **/d/** and **/h/**, live and through the archives. Switch it on in ⚙, then restart. These boards are NSFW.
+
+- **Board tabs** (`/trash/`, `/d/`, `/h/`): switch between **Live (4chan)**, which shows every thread on the board right now, and **Archive**, which shows recently bumped threads page by page. Each tile is a thread; open one to get a **thread tab** with every image in it.
+- **Thread tab**: ☆ **Watch**, ⬇ **Bulk thread**, **Open on site** and ⟳ Refresh. A thread that has disappeared from 4chan is read from its archive instead.
+- **Search** (Enter in the search box) searches the archives by text. Under **Filters ▾** you can tick boards and add a subject, filename, tripcode, "images only" or a date range.
+- **Watched** shows new images in the threads you watch since you last marked them seen.
+- **⬇ Bulk thread** saves the thread's images 3 at a time into `<download dir>/imageboard/<board>/<thread no> - <subject>/`, under the poster's **original filenames**. A different file with the same name gets ` (<post no>)` added. Each image appears in a live tab as soon as it's saved. ⚙ can switch filenames to 4chan's timestamp names.
+- **Archives** (⚙ → Boards → archive, one `board host` per line): by default desuarchive.org serves /trash/ and /d/, and archiveofsins.com serves /h/.
+- **Cloudflare**: archived.moe, and archiveofsins' search, show Cloudflare's browser check. Press **☁ Pass Cloudflare…** (on the Imageboard bar or in ⚙) and choose the archive. A small browser window opens, passes the check, keeps the cookie and closes, like JDownloader. Do it again when the pass expires; the error message will tell you.
+
 ## Everything else
 
 - ⬇ Bulk downloads everything in the current tab to `{download dir}/{site}/{tab}/` and skips files you already have.
