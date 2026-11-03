@@ -20,6 +20,17 @@ from .core import (
 )
 
 
+def why_failed(err):
+    """Text for an image that didn't show: the download error, or (downloaded fine, no error) a format Qt can't
+    decode, which is nearly always WebP without Qt's imageformats plugin."""
+    if err:
+        return str(err)
+    from PySide6.QtGui import QImageReader
+    if b"webp" not in [bytes(f) for f in QImageReader.supportedImageFormats()]:
+        return "this Qt can't decode WebP (Pawchive thumbnails, some booru files). Nix: rebuild with qt6.qtimageformats; see the log"
+    return "the file downloaded but isn't an image Qt can read"
+
+
 def rich_label():
     lab = QLabel(wordWrap=True, textFormat=Qt.RichText, textInteractionFlags=Qt.TextBrowserInteraction, alignment=Qt.AlignTop)
     lab.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -266,7 +277,7 @@ class Strip(QScrollArea):
     def got(self, i, img, err):
         try:
             if err or img.isNull():
-                self.labels[i].setText(f"page {i + 1} failed: {err}")
+                self.labels[i].setText(f"page {i + 1} failed: {why_failed(err)}")
             else:
                 self.pix[i] = QPixmap.fromImage(img)
                 self.fit(i)
@@ -410,9 +421,10 @@ class Viewer(QWidget):
             if err or img is None or img.isNull():
                 self.fails += 1
                 if original:
-                    self.quality.setText(f"original failed{': ' + str(err) if err else ''} — showing the sample")
+                    self.quality.setText(f"original failed: {why_failed(err)} — showing the sample")
                 if not self.pix and self.fails == (2 if full and not have else 1):
-                    self.img.setText(f"failed: {err}")
+                    self.img.setText(f"failed: {why_failed(err)}")
+                    log.warning("image %s #%s didn't show: %s", self.p["site"], self.p["id"], why_failed(err))
                 return
             self.pix, self.hd = QPixmap.fromImage(img), original or not full
             if original:
