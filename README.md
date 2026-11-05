@@ -1,4 +1,4 @@
-# imagesearcher
+# vibecoded slop, use at your will
 
 Browser and downloader in two sections:
 - **Boorus**: search any number of booru sites together. Any site running one of the supported engines can be added by URL:
