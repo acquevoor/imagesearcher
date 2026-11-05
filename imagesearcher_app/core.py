@@ -65,6 +65,7 @@ DEFAULTS = {
     # Pawchive: host (pawchive.st moved to .pw), default file server node, the pasted session cookie, bulk progress
     "paw": {"host": "pawchive.pw", "node": 2, "session": "", "bulk": {}},
     "paw_saved": [],
+    "rd_saved": [],
 }
 CONF_LOCK = threading.RLock()  # workers add to pixiv_map / refresh the Pixiv token while the UI saves
 
@@ -187,7 +188,7 @@ def open_url(url, data=None, headers=None, timeout=30):
     except urllib.error.HTTPError as e:
         log.warning("%s %s -> HTTP %s %s (%d ms)", method, redact(url), e.code, e.reason, (time.monotonic() - t0) * 1000)
         if e.code in (403, 503) and e.headers.get("cf-mitigated") == "challenge":
-            log.warning("%s is behind Cloudflare's browser check%s: Imageboard → ☁ Pass Cloudflare… and pick %s", host,
+            log.warning("%s is behind Cloudflare's browser check%s: ⚙ Settings → ☁ Pass Cloudflare… and pick %s", host,
                         " (your pass expired)" if host in HOST_HEADERS else "", host)
             raise urllib.error.HTTPError(url, e.code, f"{host} is behind Cloudflare's browser check: ☁ Pass Cloudflare… → {host}",
                                          e.headers, None) from None

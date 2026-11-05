@@ -400,6 +400,8 @@ class Viewer(QWidget):
             self.extra.takeAt(0).widget().setParent(None)
         for text, fn in self.section.post_actions(self):
             self.extra.addWidget(self.btn(text, fn))
+        for t in ((p.get("cats") or {}).get("character") or [])[:2]:
+            self.extra.addWidget(self.btn(f"📖 {t}", lambda t=t: self.main.read(t)))
         self.anim.stop()
         self.frames = []
         if self.strip_on and len(p["files"]) > 1:
@@ -521,6 +523,7 @@ class Viewer(QWidget):
         m.addAction("Open tab", lambda: self.section.open_tag(t, cat))
         for text, fn in self.section.tag_actions(t, cat):
             m.addAction(text, fn)
+        m.addAction("📖 Read in Reader", lambda: self.main.read(t))
         m.addAction("Blacklist", lambda: self.main.blacklist_add(t))
         m.addAction("Copy", lambda: QApplication.clipboard().setText(t))
         m.exec(self.tags.mapToGlobal(pos))

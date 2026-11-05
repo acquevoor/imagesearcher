@@ -107,6 +107,15 @@ The cookies are stored only in your config file (mode 0600) and are never logged
 
 **Sensitive media** gets `rating:e`, so blacklist `rating:e` to hide it. Turn on "Display media that may contain sensitive content" in the alt's X settings.
 
+## Reader
+What the wikis say about a tag or character. Type it in any form (`hakurei_reimu`, `Reimu Hakurei`, `初音ミク`), or right-click a tag on any image → **📖 Read in Reader**. Booru images also get a 📖 button for their characters.
+
+The list on the left shows what was found: the **Pixiv encyclopedia** summary, the wikis of your ticked **booru sites**, then **Fandom** articles from all wikis. The best hit opens by itself. Links inside an article stay in the tab (◀ ▶), and related tags open a new one.
+
+- **Full article** opens the whole Pixiv encyclopedia page in your browser; `dic.pixiv.net` is behind Cloudflare's browser check.
+- **Fandom images** also sit behind that check. The text always loads. For the pictures, use ⚙ → **☁ Pass Cloudflare…** and pick `static.wikia.nocookie.net`.
+- **Booru wikis** need a site that's up, and they also supply the Japanese name for the Pixiv lookup. If Danbooru is down, English tags may find no Pixiv entry; the status line says which sources had nothing.
+
 ## Pawchive
 Pawchive (pawchive.st, now **pawchive.pw**) is a Kemono-style archive of creators' paywalled posts from Patreon, Fanbox and similar sites. One post is one tile, and its images and videos are the tile's pages (PgUp/PgDn, ▤ strip view).
 

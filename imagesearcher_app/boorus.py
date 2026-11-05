@@ -98,12 +98,12 @@ class Danbooru(Engine):
     def count(self, q):
         return self.get("counts/posts.json", tags=q)["counts"]["posts"]
 
-    def wiki(self, tag):
+    def wiki(self, tag, n=600):
         try:
             w = self.get(f"wiki_pages/{urllib.parse.quote(tag, safe='')}.json") or {}
         except RuntimeError:
             return None  # no wiki page
-        return {"body": dtext(w.get("body")), "names": w.get("other_names", [])}
+        return {"body": dtext(w.get("body"), n), "names": w.get("other_names", [])}
 
     def wiki_names(self, tags):
         """{tag: other names} for many tags in one request (the Pixiv bridge)."""
@@ -225,9 +225,9 @@ class Moebooru(Engine):
     def count(self, q):
         return int(ElementTree.fromstring(http(f"{self.api}/post.xml?" + qs(tags=q, limit=1, **self.auth()))).get("count", 0))
 
-    def wiki(self, tag):
+    def wiki(self, tag, n=600):
         w = next((w for w in self.get("wiki.json", query=tag) or [] if w["title"] == tag), None)  # the search is fuzzy
-        return w and {"body": dtext(w.get("body")), "names": []}
+        return w and {"body": dtext(w.get("body"), n), "names": []}
 
     def related(self, tag):
         res = self.get("tag/related.json", tags=tag) or {}
@@ -290,12 +290,12 @@ class E621(Engine):
         rows = self.get("tags.json", **{"search[name]": q}) if " " not in q.strip() else []
         return rows[0]["post_count"] if isinstance(rows, list) and rows else None
 
-    def wiki(self, tag):
+    def wiki(self, tag, n=600):
         try:
             w = self.get(f"wiki_pages/{urllib.parse.quote(tag, safe='')}.json") or {}
         except RuntimeError:
             return None
-        return {"body": dtext(w.get("body")), "names": w.get("other_names", [])}
+        return {"body": dtext(w.get("body"), n), "names": w.get("other_names", [])}
 
     def related(self, tag):
         rows = self.get("tags.json", **{"search[name]": tag})
@@ -378,7 +378,7 @@ class Philomena(Engine):
     def count(self, q):
         return (self.get("api/v1/json/search/images", q=self.query(q), per_page=1) or {}).get("total")
 
-    def wiki(self, tag):
+    def wiki(self, tag, n=600):
         slug = tag.replace("_", " ")
         for a, b in (("-", "-dash-"), ("/", "-fwslash-"), (":", "-colon-"), (".", "-dot-"), ("+", "-plus-"), (" ", "+")):
             slug = slug.replace(a, b)
@@ -386,7 +386,7 @@ class Philomena(Engine):
             t = (self.get(f"api/v1/json/tags/{urllib.parse.quote(slug, safe='+')}") or {}).get("tag") or {}
         except RuntimeError:
             return None
-        return {"body": dtext(t.get("description") or t.get("short_description")), "names": []}
+        return {"body": dtext(t.get("description") or t.get("short_description"), n), "names": []}
 
 
 ENGINES = {"danbooru": Danbooru, "gelbooru": Gelbooru, "moebooru": Moebooru, "e621": E621, "philomena": Philomena}

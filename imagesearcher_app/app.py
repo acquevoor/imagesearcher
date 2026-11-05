@@ -25,6 +25,7 @@ from .core import (
 from .pixiv_ui import PixivSection
 from .ib_ui import IBSection, pass_cloudflare
 from .paw_ui import PawSection
+from .reader_ui import ReaderSection
 from .x_ui import XSection
 
 
@@ -238,15 +239,17 @@ class Main(QMainWindow):
         self.setWindowTitle("imagesearcher")
         self.resize(1400, 900)
         self.conf = load_conf()
+        imageboard.apply_passes(self.conf)  # Cloudflare passes: the Reader's images use them too
         self.cancel = None
         self.switch = QButtonGroup(self)
         top = QHBoxLayout()
         self.stack = QStackedWidget()
         self.boorus, self.pixiv = BooruSection(self), PixivSection(self)
         self.paw = PawSection(self)
+        self.reader = ReaderSection(self)
         self.x = XSection(self) if self.conf["x"]["enabled"] else None
         self.ib = IBSection(self) if self.conf["ib"]["enabled"] else None
-        secs = [(self.boorus, "Boorus", "Ctrl+1"), (self.pixiv, "Pixiv", "Ctrl+2"), (self.paw, "Pawchive", "Ctrl+5")] \
+        secs = [(self.boorus, "Boorus", "Ctrl+1"), (self.pixiv, "Pixiv", "Ctrl+2"), (self.paw, "Pawchive", "Ctrl+5"), (self.reader, "Reader", "Ctrl+6")] \
             + ([(self.x, "X", "Ctrl+3")] if self.x else []) + ([(self.ib, "Imageboard", "Ctrl+4")] if self.ib else [])
         for i, (sec, name, key) in enumerate(secs):
             b = QPushButton(f"{name}", checkable=True, toolTip=key, minimumWidth=110)
@@ -273,14 +276,18 @@ class Main(QMainWindow):
         self.statusBar().addPermanentWidget(self.cancel_btn)
         self.last_status = ""
         self.statusBar().messageChanged.connect(self.log_status)  # everything shown down there is in the log too
-        self.show_section({"pixiv": self.pixiv, "x": self.x, "ib": self.ib, "paw": self.paw}.get(self.conf["section"]) or self.boorus)
+        self.show_section({"pixiv": self.pixiv, "x": self.x, "ib": self.ib, "paw": self.paw, "rd": self.reader}.get(self.conf["section"]) or self.boorus)
 
     def show_section(self, sec):
         if self.stack.currentWidget() is not sec:
             log.info("section -> %s", self.switch.button(self.stack.indexOf(sec)).text())
         self.stack.setCurrentWidget(sec)
         self.switch.button(self.stack.indexOf(sec)).setChecked(True)
-        self.conf["section"] = {id(self.pixiv): "pixiv", id(self.x): "x", id(self.ib): "ib", id(self.paw): "paw"}.get(id(sec), "boorus")
+        self.conf["section"] = {id(self.pixiv): "pixiv", id(self.x): "x", id(self.ib): "ib", id(self.paw): "paw", id(self.reader): "rd"}.get(id(sec), "boorus")
+
+    def read(self, tag):
+        """📖 Read in Reader, from any section's tags."""
+        self.reader.search(tag)
 
     def log_status(self, msg):
         if msg and msg != self.last_status and not msg.startswith("Loading page"):

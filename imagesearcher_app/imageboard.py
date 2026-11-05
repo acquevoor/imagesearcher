@@ -17,7 +17,7 @@ from .core import CONF_LOCK, Source, cached, log, make_post, open_url, save_conf
 LIVE_API, LIVE_IMG, LIVE_BOARDS = "https://a.4cdn.org", "https://i.4cdn.org", "https://boards.4chan.org"
 ARCHIVES = ["desuarchive.org", "archiveofsins.com", "archived.moe"]  # offered in Settings
 # image servers of the archives: desuarchive's full images sit behind Cloudflare's check (thumbnails don't)
-IMAGE_HOSTS = ["desu-usergeneratedcontent.xyz"]
+IMAGE_HOSTS = ["desu-usergeneratedcontent.xyz", "static.wikia.nocookie.net"]  # the latter: Fandom images, in the Reader
 NSFW = {"d", "h", "hc", "hm", "e", "u", "aco", "gif", "r", "s", "t", "y", "b", "hr", "soc"}
 CF_MSG = "Cloudflare check on {host}: press ☁ Pass Cloudflare… (Imageboard bar or ⚙) and pick {host}, then try again"
 

@@ -23,7 +23,6 @@ class IBSection(Section):
     SAVED = "ib_saved"
 
     def __init__(self, main):
-        ib.apply_passes(main.conf)
         super().__init__(main, "search the archives…   Enter = search   (Filters ▾: boards, subject, filename, tripcode)")
         self.filters_btn = QPushButton("Filters ▾", checkable=True)
         self.bar.addWidget(self.q, 1)

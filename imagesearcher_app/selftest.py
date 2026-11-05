@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from . import boorus, bridge, core, imageboard as ib, keys, pawchive as pw, pixiv, x
+from . import boorus, bridge, core, imageboard as ib, keys, pawchive as pw, pixiv, reader as rd, x
 from .booru_ui import follow_srcs
 from .core import CACHE_MARK, cached, clear_cache, dest, fold, interleave, local, move_favorite, preset, rating_ok, allowed
 
@@ -217,6 +217,7 @@ def selftest():
     xtest()
     ibtest()
     pawtest()
+    rdtest()
     print("selftest ok")
 
 
@@ -734,3 +735,58 @@ def pawtest():
         finally:
             pw.open_url, pw.creator_name = orig_open, orig_cn
             pw.api, pw.save, pw.save_conf = orig_api, orig_save, orig_sc
+
+
+def rdtest():
+    """Reader: names from any input, the Pixiv summary, Fandom search hits, article cleaning for QTextBrowser."""
+    conf = {"pixiv_map": {"hatsune_miku": "初音ミク"}}
+    assert rd.names(conf, [], "hakurei_reimu_(cosplay)") == {"tag": "hakurei_reimu_(cosplay)", "text": "hakurei reimu", "pixiv": "hakurei reimu"}
+    assert rd.names(conf, [], "Hatsune Miku") == {"tag": "hatsune_miku", "text": "hatsune miku", "pixiv": "初音ミク"}
+    assert rd.names(conf, [], "初音ミク") == {"tag": "", "text": "初音ミク", "pixiv": "初音ミク"}
+
+    body = {"body": {"pixpedia": {"abstract": "電子の歌姫。", "image": "https://i.pximg.net/a.jpg", "yomigana": "はつねみく", "siblingsTags": ["KAITO"],
+                                  "childrenTags": ["桜ミク"], "tag": "初音ミク"},
+                     "tagTranslation": {"初音ミク": {"en": "hatsune miku", "romaji": "hatsunemiku"}}}}
+    e = rd.parse_pixiv(body, "初音ミク")
+    assert e["abstract"] == "電子の歌姫。" and e["translation"] == "hatsune miku" and e["reading"] == "はつねみく"
+    assert e["url"] == "https://dic.pixiv.net/a/%E5%88%9D%E9%9F%B3%E3%83%9F%E3%82%AF"
+    assert rd.parse_pixiv({"body": {"pixpedia": {}}}, "x") is None and rd.parse_pixiv(None, "x") is None
+    h = rd.pixiv_html(e)
+    assert "read:///KAITO" in h and "read:///%E6%A1%9C%E3%83%9F%E3%82%AF" in h and "電子の歌姫" in h
+
+    hits = rd.parse_fandom([{"title": "Reimu Hakurei", "url": "https://touhou.fandom.com/wiki/Reimu_Hakurei", "sitename": "Touhou Wiki",
+                             "content": "... <b>Reimu</b> Species &amp; Human"}, {"title": "no article", "url": "https://x.fandom.com/f/1"}])
+    assert len(hits) == 1 and hits[0]["host"] == "touhou.fandom.com" and hits[0]["page"] == "Reimu_Hakurei" and hits[0]["snippet"] == "... Reimu Species & Human"
+
+    imgs = "".join(f'<img src="https://static.wikia.nocookie.net/t/{i}.png" srcset="a 1x">' for i in range(10))
+    art = ('<aside class="portable-infobox pi-theme"><h2 class="pi-title">Reimu</h2><figure><img src="data:image/gif;base64,R0" '
+           'data-src="https://static.wikia.nocookie.net/t/lazy.png"></figure></aside>'
+           '<h2><span class="mw-headline" id="Bio">Bio</span><span class="mw-editsection"><span>[</span><a href="/wiki/x?action=edit">edit</a>'
+           '<span>]</span></span></h2><script>evil()</script><style>p{}</style>'
+           '<p style="color:red" onclick="x()"><a href="/wiki/Marisa_Kirisame" title="Marisa">Marisa</a> &amp; '
+           '<a href="/wiki/Category:Humans">cat</a> <a href="https://other.example/page">ext</a><sup class="reference"><a href="#r1">[1]</a></sup></p>'
+           '<div class="toc"><ul><li>gone</li></ul></div><table class="wikitable"><tr><td colspan="2" bgcolor="red">cell</td></tr></table>' + imgs)
+    clean, urls = rd.clean_html(art, "touhou.fandom.com")
+    assert "script" not in clean and "evil" not in clean and "edit" not in clean and "gone" not in clean and "[1]" not in clean and "<style" not in clean
+    assert 'href="wiki://touhou.fandom.com/Marisa_Kirisame"' in clean and "https://other.example/page" in clean
+    assert 'href="https://touhou.fandom.com/wiki/Category:Humans"' in clean  # not an article: leaves the Reader
+    assert "onclick" not in clean and "srcset" not in clean and "<aside" not in clean and 'colspan="2"' in clean and "bgcolor" not in clean
+    assert "Marisa</a> &amp; " in clean and "<td" in clean
+    assert len(urls) == rd.MAX_IMAGES and urls[0].endswith("/lazy.png") and clean.count("<img") == rd.MAX_IMAGES
+
+    body2 = '<p><img src="https://a/1.png"></p><p>text</p><img src="https://a/2.png?x=1&amp;y=2">'
+    assert rd.drop_images(body2, ()) == "<p>text</p>" and rd.drop_images(body2, {"https://a/2.png?x=1&y=2"}) == '<p>text</p><img src="https://a/2.png?x=1&amp;y=2">'
+    assert "static.wikia.nocookie.net" in ib.cf_hosts({"ib": core.DEFAULTS["ib"]})
+
+    class Down:
+        name, url = "Danbooru", "https://danbooru.donmai.us"
+
+        def wiki(self, tag, n=600):
+            raise RuntimeError("HTTP 503")
+
+    class Up(Down):
+        def wiki(self, tag, n=600):
+            return {"body": "x" * 5, "names": ["初音ミク"]}
+    assert rd.booru_entry(Down(), "a_b") is None
+    e = rd.booru_entry(Up(), "a_b")
+    assert e["title"] == "a b" and e["url"].endswith("/wiki_pages/a_b") and "read:///" in rd.booru_html(e)
