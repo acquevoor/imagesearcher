@@ -345,9 +345,27 @@ def fetch_file(url, path):
         tmp = path.with_name(f"{path.name}.{threading.get_ident()}.part")
         with open_url(url, timeout=120) as r, open(tmp, "wb") as f:
             shutil.copyfileobj(r, f)
+            want = (getattr(r, "headers", None) or {}).get("Content-Length")
+        if want and tmp.stat().st_size != int(want):  # a dropped connection reads as a normal end of file
+            got = tmp.stat().st_size
+            tmp.unlink()
+            raise OSError(f"download cut off: got {got // 1024} of {int(want) // 1024} kB")
         os.replace(tmp, path)
         log.info("saved %s (%.0f kB) to %s/", path.name, path.stat().st_size / 1024, path.parent.name)
     return path
+
+
+def undecodable(path):
+    """Why a downloaded file wouldn't decode, from its first bytes."""
+    head = Path(path).read_bytes()[:32]
+    size = Path(path).stat().st_size
+    if head[4:8] == b"ftyp":
+        return f"{head[8:12].decode(errors='replace').strip()} video/AVIF/HEIC file, which Qt can't decode"
+    if head.lstrip()[:1] == b"<":
+        return f"the server sent a web page ({size // 1024} kB) instead of the image"
+    if head[:3] == b"\xff\xd8\xff" or head[:4] == b"\x89PNG" or head[:4] in (b"GIF8", b"RIFF"):
+        return f"damaged or too large to decode ({size // 1024} kB file)"
+    return f"unknown file type {head[:8].hex()} ({size // 1024} kB)"
 
 
 def move_favorite(root, post, fav):

@@ -220,6 +220,7 @@ def selftest():
     pawtest()
     rdtest()
     looktest()
+    imgtest()
     print("selftest ok")
 
 
@@ -792,6 +793,47 @@ def rdtest():
     assert rd.booru_entry(Down(), "a_b") is None
     e = rd.booru_entry(Up(), "a_b")
     assert e["title"] == "a b" and e["url"].endswith("/wiki_pages/a_b") and "read:///" in rd.booru_html(e)
+
+
+def imgtest():
+    """Originals: a cut-off download is refused, a file that won't decode says why and leaves cache/, huge images decode."""
+    from PySide6.QtGui import QImage, QImageReader
+    from . import widgets
+    assert QImageReader.allocationLimit() == 1024
+
+    class R(io.BytesIO):
+        headers = {"Content-Length": "100"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+    with tempfile.TemporaryDirectory() as tmp:
+        orig, core.open_url = core.open_url, lambda url, timeout=30: R(b"x" * 40)
+        try:
+            core.fetch_file("u", Path(tmp, "cut.jpg"))
+            raise AssertionError("a short download must fail")
+        except OSError as e:
+            assert "cut off" in str(e) and not list(Path(tmp).iterdir())
+        finally:
+            core.open_url = orig
+        cache = Path(tmp, "cache")
+        cache.mkdir()
+        bad = cache / "a.jpg"
+        for data, word in ((b"<!doctype html><title>x</title>", "web page"), (b"\xff\xd8\xff\xe0broken", "damaged"), (b"\x00\x00\x00\x1cftypavif", "avif"),
+                           (b"\x12\x34\x56\x78zzzz", "unknown")):
+            bad.write_bytes(data)
+            try:
+                widgets.decode_original(bad)
+                raise AssertionError("must not decode")
+            except RuntimeError as e:
+                assert word in str(e), e
+            assert not bad.exists()
+        good = cache / "b.png"
+        img = QImage(9000, 8000, QImage.Format_RGB32)  # needs 274 MB, over Qt's default limit
+        img.fill(0x3366cc)
+        assert img.save(str(good), "PNG", 100) and not widgets.decode_original(good).isNull()
 
 
 def looktest():

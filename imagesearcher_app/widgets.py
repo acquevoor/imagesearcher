@@ -7,7 +7,7 @@ import webbrowser
 from pathlib import Path
 
 from PySide6.QtCore import QModelIndex, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QIcon, QImage, QKeySequence, QPixmap, QShortcut, QStandardItem, QStandardItemModel
+from PySide6.QtGui import QColor, QIcon, QImage, QImageReader, QKeySequence, QPixmap, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QCompleter, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
     QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QTabBar, QTabWidget, QVBoxLayout, QWidget,
@@ -17,8 +17,22 @@ from . import pixiv
 from .look import host_env
 from .core import (
     CAT_COLOR, LABELS, NAMES, PIXIV_REFERER, THUMB, allowed, cached, fetch_all, fetch_file, fold, http, interleave, local, log,
-    run, same, save_conf, to_ui,
+    run, same, save_conf, to_ui, undecodable,
 )
+
+QImageReader.setAllocationLimit(1024)  # MB; Qt's default 256 refuses images above about 67 megapixels
+
+
+def decode_original(path):
+    """A downloaded original -> QImage. A file that won't decode leaves cache/ (so opening it again downloads it
+    again) and the error says why."""
+    img = QImage(str(path))
+    if img.isNull():
+        why = undecodable(path)
+        if path.parent.name == "cache":
+            path.unlink(missing_ok=True)
+        raise RuntimeError(f"{path.name}: {why}")
+    return img
 
 
 def why_failed(err):
@@ -26,7 +40,6 @@ def why_failed(err):
     decode, which is nearly always WebP without Qt's imageformats plugin."""
     if err:
         return str(err)
-    from PySide6.QtGui import QImageReader
     if b"webp" not in [bytes(f) for f in QImageReader.supportedImageFormats()]:
         return "this Qt can't decode WebP (Pawchive thumbnails, some booru files). Nix: rebuild with qt6.qtimageformats; see the log"
     return "the file downloaded but isn't an image Qt can read"
@@ -272,7 +285,7 @@ class Strip(QScrollArea):
             self.labels.append(lab)
         self.setWidget(body)
         for i, url in enumerate(post["files"]):  # queued in order, so pages arrive top to bottom
-            run(lambda i=i, url=url: QImage(str(cached(root, post, i) or fetch_file(url, local(root, post, i, "cache")))),
+            run(lambda i=i, url=url: decode_original(cached(root, post, i) or fetch_file(url, local(root, post, i, "cache"))),
                 lambda img, e, i=i: self.got(i, img, e), "view")
 
     def got(self, i, img, err):
@@ -438,7 +451,7 @@ class Viewer(QWidget):
             run(lambda: QImage.fromData(http(sample)), lambda i, e: done(i, e, False), "view")
         if full:
             # ponytail: Qt refuses to decode images over 256 MB (~8000×8000), the sample stays up then
-            run(lambda: QImage(str(have or fetch_file(full, local(root, p, pg, folder)))), lambda i, e: done(i, e, True), "view")
+            run(lambda: decode_original(have or fetch_file(full, local(root, p, pg, folder))), lambda i, e: done(i, e, True), "view")
         self.prefetch(root)
         if p.get("ugoira"):
             conf = self.main.conf
