@@ -1,7 +1,7 @@
 { lib, stdenvNoCC, python3, qt6, mpv, makeWrapper, makeDesktopItem, copyDesktopItems }:
 stdenvNoCC.mkDerivation {
   pname = "imagesearcher";
-  version = "2.0.0";
+  version = "2.1.0";
   src = lib.fileset.toSource { root = ./.; fileset = lib.fileset.unions [ ./imagesearcher.py ./imagesearcher_app ]; };
   nativeBuildInputs = [ makeWrapper copyDesktopItems ];
   desktopItems = [
