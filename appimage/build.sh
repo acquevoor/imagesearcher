@@ -31,19 +31,49 @@ mkdir -p "$APPDIR/usr/app"
 tar -xzf "$BUILD/python.tar.gz" -C "$APPDIR/usr"      # -> usr/python
 PY="$APPDIR/usr/python/bin/python3"
 "$PY" -m pip install --no-cache-dir --disable-pip-version-check --no-warn-script-location ${PYSIDE:-PySide6}
-# drop what the app never loads (QML, headers, dev tools): about a third of PySide6's size
+# nothing of the host's desktop theme may load: the app brings its own look (imagesearcher_app/look.py)
 SITE=$("$PY" -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
-rm -rf "$SITE"/PySide6/{qml,include,typesystems,glue,scripts,examples,doc} \
-       "$SITE"/PySide6/{designer,assistant,linguist,lupdate,lrelease,qmlls,qmllint,qmlformat,qmltyperegistrar,uic,rcc} 2>/dev/null || true
+rm -f "$SITE"/PySide6/Qt/plugins/platformthemes/libqgtk3.so
+# what the app never loads: QML, 3D, and the dev tools and headers
+rm -rf "$SITE"/PySide6/{include,typesystems,glue,scripts,examples,doc,assistant,designer,linguist,lupdate,lrelease,uic,rcc} \
+       "$SITE"/PySide6/Qt/plugins/{designer,qmltooling,sqldrivers,sceneparsers,assetimporters,geometryloaders,renderers,renderplugins,canbus,sensors,texttospeech,position,scxmldatamodel}
 find "$APPDIR/usr/python" -name "__pycache__" -prune -exec rm -rf {} +
 cp -r imagesearcher.py imagesearcher_app README.md "$APPDIR/usr/app/"
 rm -rf "$APPDIR/usr/app/imagesearcher_app/__pycache__"
+(cd "$APPDIR/usr/app" && sha256sum imagesearcher.py imagesearcher_app/*.py | awk '{print $1, $2}' > MANIFEST)
+
+# everything else a desktop session would provide: libraries and fonts
+python3 appimage/bundle_libs.py "$APPDIR"
+mkdir -p "$APPDIR/usr/fonts"
+for f in /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf \
+         /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc \
+         /usr/share/fonts/truetype/noto/NotoColorEmoji.ttf; do
+  cp "$f" "$APPDIR/usr/fonts/"
+done
+
+# programs of the host (your browser, file manager) must not inherit the AppImage's libraries
+mkdir -p "$APPDIR/usr/bin"
+cat > "$APPDIR/usr/bin/xdg-open" <<'OPEN'
+#!/bin/sh
+unset LD_LIBRARY_PATH
+PATH="$IMAGESEARCHER_HOST_PATH"
+exec xdg-open "$@"
+OPEN
+chmod +x "$APPDIR/usr/bin/xdg-open"
 
 cat > "$APPDIR/AppRun" <<'RUN'
 #!/bin/sh
 # The app inside the AppImage; settings, history and downloads go to the usual places in your home folder.
+# Nothing of the host's Python or Qt setup may leak in, or its plugins and themes would load into this Qt.
 HERE="$(dirname "$(readlink -f "$0")")"
-export PYTHONNOUSERSITE=1
+unset PYTHONPATH PYTHONHOME QT_PLUGIN_PATH QML2_IMPORT_PATH QT_STYLE_OVERRIDE QT_QPA_PLATFORMTHEME QT_QPA_PLATFORM_PLUGIN_PATH
+export PYTHONNOUSERSITE=1 IMAGESEARCHER_BUNDLED=1 IMAGESEARCHER_FONTS="$HERE/usr/fonts" IMAGESEARCHER_HOST_PATH="$PATH"
+export LD_LIBRARY_PATH="$HERE/usr/lib" PATH="$HERE/usr/bin:$PATH"
+# the built-in browser's sandbox needs user namespaces: some distros (Ubuntu 24+) restrict them, then it can't start with one
+if [ "$(id -u)" = 0 ] || [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ] ||
+   [ "$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null)" = 0 ]; then
+  export QTWEBENGINE_DISABLE_SANDBOX=1
+fi
 exec "$HERE/usr/python/bin/python3" "$HERE/usr/app/imagesearcher.py" "$@"
 RUN
 chmod +x "$APPDIR/AppRun"

@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import tempfile
 import threading
 import time
@@ -10,7 +11,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from . import boorus, bridge, core, imageboard as ib, keys, pawchive as pw, pixiv, reader as rd, x
+from . import boorus, bridge, core, imageboard as ib, keys, look, pawchive as pw, pixiv, reader as rd, x
 from .booru_ui import follow_srcs
 from .core import CACHE_MARK, cached, clear_cache, dest, fold, interleave, local, move_favorite, preset, rating_ok, allowed
 
@@ -218,6 +219,7 @@ def selftest():
     ibtest()
     pawtest()
     rdtest()
+    looktest()
     print("selftest ok")
 
 
@@ -790,3 +792,27 @@ def rdtest():
     assert rd.booru_entry(Down(), "a_b") is None
     e = rd.booru_entry(Up(), "a_b")
     assert e["title"] == "a b" and e["url"].endswith("/wiki_pages/a_b") and "read:///" in rd.booru_html(e)
+
+
+def looktest():
+    """The AppImage's look: KvDark colors, nothing applied or changed outside the AppImage, a clean host environment."""
+    from PySide6.QtGui import QPalette
+    p = look.palette()
+    assert p.color(QPalette.Window).name() == "#3d3d3e" and p.color(QPalette.Base).name() == "#2e2e2e"
+    assert p.color(QPalette.Highlight).name() == "#c3c3c3" and p.color(QPalette.HighlightedText).name() == "#000000"
+    assert p.color(QPalette.Disabled, QPalette.Text).name() == "#a0a0a0" and p.color(QPalette.Text).name() == "#ffffff"
+    saved = {k: os.environ.get(k) for k in ("IMAGESEARCHER_BUNDLED", "LD_LIBRARY_PATH", "IMAGESEARCHER_HOST_PATH", "PATH")}
+    try:
+        os.environ.pop("IMAGESEARCHER_BUNDLED", None)
+
+        class NoApp:
+            def __getattr__(self, name):
+                raise AssertionError("look.apply must not touch the app outside the AppImage")
+        look.apply(NoApp())
+        os.environ.update(LD_LIBRARY_PATH="/x", PATH="/inner:/usr/bin", IMAGESEARCHER_HOST_PATH="/usr/bin")
+        assert look.host_env()["LD_LIBRARY_PATH"] == "/x" and look.host_env()["PATH"] == "/inner:/usr/bin"  # not an AppImage: untouched
+        os.environ["IMAGESEARCHER_BUNDLED"] = "1"
+        assert "LD_LIBRARY_PATH" not in look.host_env() and look.host_env()["PATH"] == "/usr/bin"
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)

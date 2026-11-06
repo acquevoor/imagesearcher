@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import pixiv
+from .look import host_env
 from .core import (
     CAT_COLOR, LABELS, NAMES, PIXIV_REFERER, THUMB, allowed, cached, fetch_all, fetch_file, fold, http, interleave, local, log,
     run, same, save_conf, to_ui,
@@ -511,7 +512,7 @@ class Viewer(QWidget):
         log.info("play video %s #%s", p["site"], p["id"])
         url = next((u for u in p["samples"] + p["files"] if Path(urllib.parse.urlparse(u).path).suffix in (".mp4", ".webm")), p["files"][0])
         try:
-            subprocess.Popen(["mpv", f"--referrer={PIXIV_REFERER}" if p["site"] == "pixiv" else "--", url])
+            subprocess.Popen(["mpv", f"--referrer={PIXIV_REFERER}" if p["site"] == "pixiv" else "--", url], env=host_env())
         except FileNotFoundError:  # no mpv (typical on Windows): let the browser play it
             webbrowser.open(p["page"])
 

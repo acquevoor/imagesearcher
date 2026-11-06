@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from . import core, imageboard, pawchive, pixiv, x
+from . import core, imageboard, look, pawchive, pixiv, x
 from .booru_ui import BooruSection
 from .keys import KeysDialog, missing
 from .core import (
@@ -441,7 +441,10 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("imagesearcher")
     app.setDesktopFileName("imagesearcher")
+    look.apply(app)  # the AppImage only: its own look and fonts
     core.bridge = core.Bridge()
+    if "--bundle-check" in sys.argv:
+        sys.exit(1 if look.bundle_check(app) else 0)
     import PySide6
     log.info("started: Python %s, PySide6 %s, %s %s", platform.python_version(), PySide6.__version__, platform.system(), platform.release())
     w = Main()
@@ -460,6 +463,9 @@ def main():
     log.info("imageboard: %s", "off" if not c["ib"]["enabled"] else
              "on, " + ", ".join(f"/{b}/ via {h}" for b, h in c["ib"]["boards"].items()) + (f"; Cloudflare passed for {', '.join(c['ib']['cf'])}" if c["ib"]["cf"] else ""))
     w.show()
+    if "--screenshot" in sys.argv:  # a picture of the real window (the AppImage's build checks it on several distros)
+        shot = sys.argv[sys.argv.index("--screenshot") + 1]
+        QTimer.singleShot(4000, lambda: (log.info("screenshot %s: %s", shot, w.grab().save(shot)), app.quit()))
     if w.conf["keys_prompt"] and missing(w.conf):  # offered on every launch while a key is empty, unless switched off
         QTimer.singleShot(0, lambda: KeysDialog(w).show())
     code = app.exec()

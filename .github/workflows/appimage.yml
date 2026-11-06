@@ -1,6 +1,7 @@
-# Builds imagesearcher-x86_64.AppImage (appimage/build.sh: portable CPython + PySide6 + the app, packed by the
-# official appimagetool). Runs by hand (Actions -> AppImage -> Run workflow) or for a pushed v* tag, which also
-# attaches the AppImage to that tag's GitHub Release.
+# Builds imagesearcher-x86_64.AppImage (appimage/build.sh: portable CPython + PySide6 + the libraries and fonts a desktop
+# session would provide + the app, packed by the official appimagetool), then proves it on bare containers of other
+# distros. Runs by hand (Actions -> AppImage -> Run workflow) or for a pushed v* tag, which also publishes it on that
+# tag's GitHub Release, but only if every distro passed.
 name: AppImage
 on:
   workflow_dispatch:
@@ -13,30 +14,73 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - name: Qt's system libraries (desktops have them; the bare CI image doesn't)
-        run: sudo apt-get update -q && sudo apt-get install -y -q libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3 libglib2.0-0 xvfb libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0 libnss3 libasound2
+      - name: The libraries and fonts that go into the AppImage
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libegl1 libgl1 libopengl0 libglib2.0-0 libdbus-1-3 libfontconfig1 libxkbcommon0 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 \
+            libwayland-client0 libwayland-cursor0 libwayland-egl1 libnss3 libnspr4 libasound2 libxcomposite1 libxdamage1 libxrandr2 libxtst6 \
+            libxkbfile1 libxshmfence1 libxi6 libxrender1 libsm6 libice6 libpulse0 libcups2 libatk1.0-0 libgbm1 \
+            fonts-dejavu-core fonts-noto-cjk fonts-noto-color-emoji
       - name: Build
         run: bash appimage/build.sh
-      - name: Self-check inside the AppImage
-        run: APPIMAGE_EXTRACT_AND_RUN=1 ./imagesearcher-x86_64.AppImage --selftest
-      - name: Start the real app on a virtual display (must still be running after 20 s, with WebP and the browser engine)
-        run: |
-          export APPIMAGE_EXTRACT_AND_RUN=1 QT_QPA_PLATFORM=xcb
-          set +e
-          xvfb-run -a timeout 20 ./imagesearcher-x86_64.AppImage 2>&1 | tee run.log
-          code=${PIPESTATUS[0]}
-          set -e
-          [ "$code" = 124 ] || { echo "the app exited by itself with code $code"; exit 1; }
-          grep -q "started: Python" run.log
-          ! grep -qE "Traceback|unhandled error|can't decode WebP|Could not load the Qt platform" run.log
       - uses: actions/upload-artifact@v4
         with:
           name: imagesearcher-x86_64.AppImage
           path: imagesearcher-x86_64.AppImage
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: ubuntu-24.04, image: "ubuntu:24.04", deps: "apt-get update -q && apt-get install -y -q xvfb libegl1 libgl1 libglx-mesa0 fontconfig libstdc++6 ca-certificates" }
+          - { name: debian-12, image: "debian:12", deps: "apt-get update -q && apt-get install -y -q xvfb libegl1 libgl1 libglx-mesa0 fontconfig libstdc++6 ca-certificates" }
+          - { name: fedora, image: "fedora:latest", deps: "dnf install -y -q xorg-x11-server-Xvfb mesa-libEGL mesa-libGL mesa-dri-drivers fontconfig" }
+          - { name: arch, image: "archlinux:latest", deps: "pacman -Sy --noconfirm --needed xorg-server-xvfb mesa fontconfig" }
+    container: ${{ matrix.image }}
+    steps:
+      - name: Only what any desktop has (graphics, fontconfig, a display)
+        run: ${{ matrix.deps }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: imagesearcher-x86_64.AppImage
+      - name: Run it
+        shell: bash
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          QT_QPA_PLATFORM: xcb
+          DISPLAY: ":99"
+        run: |
+          chmod +x imagesearcher-x86_64.AppImage
+          Xvfb :99 -screen 0 1400x900x24 &
+          sleep 2
+          ./imagesearcher-x86_64.AppImage --selftest
+          ./imagesearcher-x86_64.AppImage --bundle-check
+          ./imagesearcher-x86_64.AppImage --screenshot "$PWD/${{ matrix.name }}.png" 2>&1 | tee run.log
+          test -s "${{ matrix.name }}.png"
+          grep -q "started: Python" run.log
+          ! grep -qE "Traceback|unhandled error|can't decode WebP|Could not load the Qt platform" run.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshot-${{ matrix.name }}
+          path: ${{ matrix.name }}.png
+
+  release:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: imagesearcher-x86_64.AppImage
       - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Linux AppImage: download, chmod +x, run."
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Linux AppImage: download, chmod +x, run. Self-contained: tested on Ubuntu 24.04, Debian 12, Fedora and Arch."
           gh release upload "$GITHUB_REF_NAME" imagesearcher-x86_64.AppImage --clobber
