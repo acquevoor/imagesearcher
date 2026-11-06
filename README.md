@@ -164,9 +164,15 @@ Browse 4chan's **/trash/**, **/d/** and **/h/**, live and through the archives. 
 - Config is `~/.config/imagesearcher/config.json` (mode 0600, holds your keys). A config from version 1 is converted on first start; the old file is kept as `config.v1.json`.
 
 ## Linux AppImage (no install)
-Download `imagesearcher-x86_64.AppImage` from the repo's **Releases** page, make it executable (`chmod +x imagesearcher-x86_64.AppImage`, or tick "Allow executing" in your file manager's Properties) and run it. It brings its own Python and Qt, so nothing else needs to be installed. Settings, history and downloads go to the same places in your home folder as with the other versions.
+Download `imagesearcher-x86_64.AppImage` from the repo's **Releases** page, make it executable (`chmod +x imagesearcher-x86_64.AppImage`, or tick "Allow executing" in your file manager's Properties) and run it.
 
-To build it yourself, run `appimage/build.sh` (on NixOS: `steam-run appimage/build.sh`). It downloads a portable Python (python-build-standalone), PySide6 from pip and the official appimagetool. On GitHub, **Actions → AppImage → Run workflow** builds it, and pushing a `v*` tag builds it and attaches it to that release.
+It's the same app as every other version, and it carries what a desktop would otherwise have to provide: Python, Qt, the built-in browser, its own libraries and fonts (Japanese and emoji included), and the dark look, so it appears the same on every distro. It needs only a Linux desktop with glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+, recent Fedora, Arch, Steam Deck). Each release is tested on Ubuntu 24.04, Debian 12, Fedora and Arch.
+
+- **Settings** start fresh on a new machine. X and Imageboard are off until you tick them in ⚙, and keys and logins are empty. To bring your own, copy `~/.config/imagesearcher/` across; it holds your keys, so never share it.
+- **Videos** play in mpv if it's installed, otherwise in your browser.
+- **History logs** go to `~/.config/imagesearcher/history/` (📂 opens the folder), because an AppImage can't write next to itself.
+
+To build it yourself, run `appimage/build.sh` on a Debian or Ubuntu machine (on NixOS: `steam-run appimage/build.sh`); `.github/workflows/appimage.yml` lists the packages it needs. On GitHub, **Actions → AppImage → Run workflow** builds and tests it, and pushing a `v*` tag publishes it on that release once all four distros pass.
 
 ## Windows (no terminal needed)
 1. Install Python from https://www.python.org/downloads/ . In the installer, tick **"Add python.exe to PATH"** and click *Install Now*.
