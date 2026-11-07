@@ -3,9 +3,15 @@
 added) and a Pixiv section. This launcher installs PySide6 on a plain Python (Windows double-click) and starts the app,
 which lives in the imagesearcher_app/ folder next to this file."""
 import importlib.util
+import io
 import os
+import re
+import shutil
 import subprocess
 import sys
+import threading
+import urllib.request
+import zipfile
 
 try:
     import PySide6.QtWidgets  # noqa: F401
@@ -24,23 +30,101 @@ except ImportError as e:  # first double-click on a plain Python install (e.g. W
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)  # the imagesearcher_app/ folder next to this file
+os.environ["IMAGESEARCHER_HOME"] = HERE  # history stays here even when the code runs from CODE
+REPO = "acquevoor/imagesearcher"
+CODE = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "imagesearcher", "code")
 
 
-def update(folder=HERE):
-    """A git clone updates itself on start. Offline, no git or local edits in the way: start as it is."""
-    if not os.path.exists(os.path.join(folder, ".git")):  # a ZIP, the AppImage or the Nix package
-        return
+def fetch(url, accept="*/*", timeout=30):
+    req = urllib.request.Request(url, headers={"User-Agent": "imagesearcher", "Accept": accept})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def current(code):
+    """The folder of the downloaded code to run, or None."""
     try:
-        r = subprocess.run(["git", "-C", folder, "pull", "--ff-only", "--quiet"], capture_output=True, text=True, timeout=15,
-                           env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
-        if r.returncode:
-            print("Not updated:", r.stderr.strip())
-    except (OSError, subprocess.TimeoutExpired) as e:
+        with open(os.path.join(code, "current")) as f:
+            folder = os.path.join(code, f.read().strip())
+    except OSError:
+        return None
+    return folder if os.path.exists(os.path.join(folder, "imagesearcher_app", "app.py")) else None
+
+
+def install(data, sha, code):
+    """Put a GitHub ZIP's imagesearcher_app/ in CODE/<sha>; nothing changes unless every file compiles."""
+    part = os.path.join(code, f"{sha}.{os.getpid()}.part")
+    shutil.rmtree(part, ignore_errors=True)
+    os.makedirs(os.path.join(part, "imagesearcher_app"))
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        for name in z.namelist():
+            top = name.split("/")  # <repo>-<sha>/imagesearcher_app/x.py; anything else stays out
+            if len(top) == 3 and top[1] == "imagesearcher_app" and top[2].endswith(".py"):
+                body = z.read(name)
+                compile(body, name, "exec")
+                with open(os.path.join(part, "imagesearcher_app", top[2]), "wb") as f:
+                    f.write(body)
+    if not os.path.exists(os.path.join(part, "imagesearcher_app", "app.py")):
+        raise ValueError("no app in the download")
+    keep = {sha, os.path.basename(current(code) or "")}  # the older one: a window still open may import from it
+    if os.path.exists(os.path.join(code, sha)):
+        shutil.rmtree(part)
+    else:
+        os.rename(part, os.path.join(code, sha))
+    with open(os.path.join(code, "current.tmp"), "w") as f:
+        f.write(sha)
+    os.replace(os.path.join(code, "current.tmp"), os.path.join(code, "current"))
+    for old in set(os.listdir(code)) - keep - {"current"}:
+        shutil.rmtree(os.path.join(code, old), ignore_errors=True)
+
+
+def update(folder=HERE, code=CODE):
+    """Never stops the app: offline, no git, local edits in the way or a bad download just means it starts as it is.
+    A clone pulls. A ZIP, the AppImage and the Nix package have no .git (and two of them are read-only), so the
+    latest imagesearcher_app/ goes in CODE, which is run instead of the copy next to this file."""
+    try:
+        if os.path.exists(os.path.join(folder, ".git")):
+            r = subprocess.run(["git", "-C", folder, "pull", "--ff-only", "--quiet"], capture_output=True, text=True, timeout=15,
+                               env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+            print("Not updated:", r.stderr.strip()) if r.returncode else print("Up to date")
+            return
+        sha = fetch(f"https://api.github.com/repos/{REPO}/commits/master", "application/vnd.github.sha", 8).decode().strip()
+        if not re.fullmatch("[0-9a-f]{40}", sha):
+            raise ValueError("unexpected answer from GitHub")
+        if os.path.basename(current(code) or "") == sha:
+            return print("Up to date")
+        os.makedirs(code, exist_ok=True)
+        install(fetch(f"https://github.com/{REPO}/archive/{sha}.zip"), sha, code)
+        print("Updated to", sha[:7])
+    except Exception as e:
         print("Not updated:", e)
 
 
-if __name__ == "__main__":
-    if len(sys.argv) == 1:  # not for --selftest and the like
-        update()
+def load():
+    """The app's main(). If the downloaded code won't load, the copy next to this file still does."""
+    folder = None if os.path.exists(os.path.join(HERE, ".git")) else current(CODE)
+    if folder and sys.argv[1:] in ([], ["--update"]):
+        sys.path.insert(0, folder)
+        try:
+            from imagesearcher_app.app import main
+            return main
+        except Exception as e:
+            print("The update won't load, using the built-in version:", e)
+            sys.path.remove(folder)
+            for m in [m for m in sys.modules if m.split(".")[0] == "imagesearcher_app"]:
+                del sys.modules[m]
     from imagesearcher_app.app import main
-    main()
+    return main
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] in ([], ["--update"]):  # not for --selftest and the like
+        # a thread: a dead network can hang past any timeout. If it's still going, the app starts and it finishes for next time
+        t = threading.Thread(target=update, daemon=True)
+        t.start()
+        t.join(90 if sys.argv[1:] else 20)
+    main = load()
+    if sys.argv[1:] == ["--update"]:  # the AppImage's build checks this: the download worked and loads in here
+        print("code:", sys.modules[main.__module__].__file__)
+    else:
+        main()

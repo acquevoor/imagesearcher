@@ -127,7 +127,7 @@ def save_conf(conf):
 # ---------- logging ----------
 # Only user/app actions are logged (searches, views, downloads, favorites, settings, errors), never keys or tokens.
 log = logging.getLogger("imagesearcher")
-APP_DIR = Path(__file__).resolve().parents[1]
+APP_DIR = Path(os.environ.get("IMAGESEARCHER_HOME") or Path(__file__).resolve().parents[1])
 # next to imagesearcher.py, so it's in the same, findable place for everyone (unzipped or git-cloned);
 # a read-only install (Nix store) falls back to the config dir
 HISTORY_DIR = APP_DIR / "history" if os.access(APP_DIR, os.W_OK) else CONF_PATH.parent / "history"

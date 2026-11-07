@@ -850,12 +850,11 @@ def imgtest():
 
 
 def updatetest():
-    """The launcher: a clone fast-forwards, local edits and a folder without .git are left alone."""
+    """The launcher: a clone fast-forwards and keeps local edits; without .git a download is installed only if it compiles."""
     import importlib.util
     import shutil
     import subprocess
-    if not shutil.which("git"):
-        return
+    import zipfile
     spec = importlib.util.spec_from_file_location("launcher", Path(__file__).parent.parent / "imagesearcher.py")
     launcher = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(launcher)
@@ -865,21 +864,48 @@ def updatetest():
     with tempfile.TemporaryDirectory() as tmp:
         up, me, plain = Path(tmp, "up"), Path(tmp, "me"), Path(tmp, "plain")
         up.mkdir(), plain.mkdir()
-        git(up, "init", "-q")
-        (up / "f").write_text("1")
-        git(up, "add", "f")
-        git(up, "commit", "-qm", "1")
-        git(tmp, "clone", "-q", str(up), str(me))
-        (up / "f").write_text("2")
-        git(up, "commit", "-qam", "2")
-        launcher.update(str(me))
-        assert (me / "f").read_text() == "2"
-        (up / "f").write_text("3")
-        git(up, "commit", "-qam", "3")
-        (me / "f").write_text("mine")  # would be overwritten, so git refuses and the app starts anyway
-        launcher.update(str(me))
-        assert (me / "f").read_text() == "mine"
-        launcher.update(str(plain))
+        if shutil.which("git"):
+            git(up, "init", "-q")
+            (up / "f").write_text("1")
+            git(up, "add", "f")
+            git(up, "commit", "-qm", "1")
+            git(tmp, "clone", "-q", str(up), str(me))
+            (up / "f").write_text("2")
+            git(up, "commit", "-qam", "2")
+            launcher.update(str(me))
+            assert (me / "f").read_text() == "2"
+            (up / "f").write_text("3")
+            git(up, "commit", "-qam", "3")
+            (me / "f").write_text("mine")  # would be overwritten, so git refuses and the app starts anyway
+            launcher.update(str(me))
+            assert (me / "f").read_text() == "mine"
+
+        def fake_zip(**files):
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as z:
+                for name, body in files.items():
+                    z.writestr(name.replace("__", "/"), body)
+            return buf.getvalue()
+        sha1, sha2, sha3, code = "a" * 40, "b" * 40, "c" * 40, str(Path(tmp, "code"))
+        served = {}
+        launcher.fetch = lambda url, accept="", timeout=30: served["sha"].encode() if "api.github" in url else served["zip"]
+        served.update(sha=sha1, zip=fake_zip(**{"r/imagesearcher_app/app.py": "main = 1", "r/evil.py": "x", "r/imagesearcher_app/sub/x.py": "x"}))
+        launcher.update(str(plain), code)
+        assert launcher.current(code) == str(Path(code, sha1)) and sorted(os.listdir(Path(code, sha1, "imagesearcher_app"))) == ["app.py"]
+        served["zip"] = None  # same commit: nothing is downloaded (install would raise, and current stays)
+        launcher.update(str(plain), code)
+        assert launcher.current(code) == str(Path(code, sha1))
+        served.update(sha=sha2, zip=fake_zip(**{"r/imagesearcher_app/app.py": "def broken(:"}))
+        launcher.update(str(plain), code)
+        assert launcher.current(code) == str(Path(code, sha1)) and sha2 not in os.listdir(code), "a file that doesn't compile changes nothing"
+        served.update(sha=sha2, zip=fake_zip(**{"r/imagesearcher_app/app.py": "main = 2"}))
+        launcher.update(str(plain), code)
+        served.update(sha=sha3, zip=fake_zip(**{"r/imagesearcher_app/app.py": "main = 3"}))
+        launcher.update(str(plain), code)
+        assert launcher.current(code) == str(Path(code, sha3)) and sorted(os.listdir(code)) == sorted([sha2, sha3, "current"])
+        served["sha"] = "<html>"
+        launcher.update(str(plain), code)
+        assert launcher.current(code) == str(Path(code, sha3))
 
 
 def looktest():

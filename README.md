@@ -183,6 +183,13 @@ It's the same app as every other version, and it carries what a desktop would ot
 
 To build it yourself, run `appimage/build.sh` on a Debian or Ubuntu machine (on NixOS: `steam-run appimage/build.sh`); `.github/workflows/appimage.yml` lists the packages it needs. On GitHub, **Actions → AppImage → Run workflow** builds and tests it, and pushing a `v*` tag publishes it on that release once all four distros pass.
 
+## Updates
+Every copy updates itself when it starts, so there's nothing to re-download:
+- A `git clone` runs `git pull`.
+- The ZIP, the AppImage and the Nix package download the latest `imagesearcher_app/` from this repository's `master` into `~/.config/imagesearcher/code/` and run it from there.
+
+If you're offline, or an update is broken, the app starts with the version it has. This runs code from this repository on your machine each time it changes.
+
 ## Windows (no terminal needed)
 1. Install Python from https://www.python.org/downloads/ . In the installer, tick **"Add python.exe to PATH"** and click *Install Now*.
 2. On this GitHub page click the green **Code** button → **Download ZIP**, then right-click the ZIP → **Extract All**.
@@ -194,7 +201,7 @@ To build it yourself, run `appimage/build.sh` on a Debian or Ubuntu machine (on 
 
 Settings and favorites are saved in `C:\Users\<you>\.config\imagesearcher\`, and downloads go to `Pictures\imagesearcher`.
 
-To update, download the ZIP again and replace the folder (your settings are kept). A `git clone` updates itself each time it starts.
+Updates are automatic, see [Updates](#updates).
 
 ## Credentials
 **Gelbooru, Rule34 and Pixiv: the key fetcher.**

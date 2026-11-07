@@ -59,6 +59,9 @@ jobs:
           sleep 2
           ./imagesearcher-x86_64.AppImage --selftest
           ./imagesearcher-x86_64.AppImage --bundle-check
+          ./imagesearcher-x86_64.AppImage --update | tee update.log
+          grep -E "^(Updated to|Up to date)" update.log
+          grep "^code: .*/imagesearcher/code/" update.log
           ./imagesearcher-x86_64.AppImage --screenshot "$PWD/${{ matrix.name }}.png" 2>&1 | tee run.log
           test -s "${{ matrix.name }}.png"
           grep -q "started: Python" run.log
