@@ -342,7 +342,7 @@ class Viewer(QWidget):
         side = QVBoxLayout()
         side.addLayout(nav)
         for w in (self.pages, self.info, self.quality, QLabel("Tags (double-click = open tab, right-click = more)"), self.tags,
-                  btn("⬇ Download (D)", self.download), self.fav, self.play, self.strip_btn):
+                  btn("⬇ Download (D)", self.download), btn("📋 Copy image (C)", self.copy), self.fav, self.play, self.strip_btn):
             side.addWidget(w)
         side.addLayout(self.extra)
         side.addWidget(btn("Open page", lambda: webbrowser.open(self.p["page"])))
@@ -355,11 +355,18 @@ class Viewer(QWidget):
 
         for key, fn in ((Qt.Key_Left, lambda: self.step(-1)), (Qt.Key_Right, lambda: self.step(1)),
                         (Qt.Key_PageUp, lambda: self.flip(-1)), (Qt.Key_PageDown, lambda: self.flip(1)),
-                        (Qt.Key_D, self.download), (Qt.Key_F, self.fav.click)):
+                        (Qt.Key_D, self.download), (Qt.Key_C, self.copy), (Qt.Key_F, self.fav.click)):
             QShortcut(QKeySequence(key), self, fn).setContext(Qt.WidgetWithChildrenShortcut)  # only in the visible image tab
 
     def download(self):
         self.main.download(self.p, self.grid.feed.label if self.grid.feed else "favorites")
+
+    def copy(self):
+        """The picture on screen: the original once it's in, a video's or animation's current frame."""
+        if not self.pix:
+            return self.main.statusBar().showMessage("Nothing to copy yet: the image is still loading")
+        QApplication.clipboard().setPixmap(self.pix)
+        self.main.statusBar().showMessage(f"Copied {self.pix.width()}x{self.pix.height()} image" + ("" if self.hd else " (the original isn't in yet)"))
 
     def locate(self):
         """This tab's row in its grid; rows move when the grid reloads, the tab keeps its post either way."""

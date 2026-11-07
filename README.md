@@ -45,7 +45,7 @@ Includes a desktop entry. Without Nix: `python imagesearcher.py` with PySide6 in
 - **Top row**: one tab per search, tag, artist, pool or Pixiv user, plus the section's fixed tabs. Searching the same thing again switches to its tab.
 - **Second row**: inside each top tab, its ▦ Grid plus one tab per image you open.
   - Double-click a thumb to open it, Ctrl+double-click or middle-click to open it in the background.
-  - In an image tab: ←/→ walk the grid, PgUp/PgDn flip pages, D download, F favorite, Esc back to the grid, Ctrl+W close, Ctrl+Tab cycle.
+  - In an image tab: ←/→ walk the grid, PgUp/PgDn flip pages, D download, C copy the image, F favorite, Esc back to the grid, Ctrl+W close, Ctrl+Tab cycle.
   - Multi-page works get **▤ Strip view**: all pages stacked to scroll through, for manga.
   - Opening an image downloads its original into `{download dir}/cache/` and shows it from there. The next image is fetched ahead, so → is instant. **`cache/` is deleted when the app closes.**
   - ♥ moves the post's originals into `{download dir}/favorites/`, next to `cache/`, and downloads any pages you haven't opened. Un-♥ moves them back to `cache/`.
