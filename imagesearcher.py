@@ -22,8 +22,25 @@ except ImportError as e:  # first double-click on a plain Python install (e.g. W
     os.environ["IMAGESEARCHER_PIP_TRIED"] = "1"
     sys.exit(subprocess.call([sys.executable] + sys.argv))
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # the imagesearcher_app/ folder next to this file
-from imagesearcher_app.app import main  # noqa: E402
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)  # the imagesearcher_app/ folder next to this file
+
+
+def update(folder=HERE):
+    """A git clone updates itself on start. Offline, no git or local edits in the way: start as it is."""
+    if not os.path.exists(os.path.join(folder, ".git")):  # a ZIP, the AppImage or the Nix package
+        return
+    try:
+        r = subprocess.run(["git", "-C", folder, "pull", "--ff-only", "--quiet"], capture_output=True, text=True, timeout=15,
+                           env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        if r.returncode:
+            print("Not updated:", r.stderr.strip())
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print("Not updated:", e)
+
 
 if __name__ == "__main__":
+    if len(sys.argv) == 1:  # not for --selftest and the like
+        update()
+    from imagesearcher_app.app import main
     main()

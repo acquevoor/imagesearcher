@@ -121,7 +121,8 @@ class Grid(QListWidget):
         def fetch():
             if gen != self.gen:  # stale search, skip the download
                 return None
-            return QImage.fromData(http(url)).scaled(THUMB, THUMB, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            img = QImage.fromData(http(url))
+            return img if img.isNull() else img.scaled(THUMB, THUMB, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
         def done(img, err):
             if err or img is None or img.isNull():

@@ -194,7 +194,7 @@ To build it yourself, run `appimage/build.sh` on a Debian or Ubuntu machine (on 
 
 Settings and favorites are saved in `C:\Users\<you>\.config\imagesearcher\`, and downloads go to `Pictures\imagesearcher`.
 
-To update, download the ZIP again and replace the folder (your settings are kept).
+To update, download the ZIP again and replace the folder (your settings are kept). A `git clone` updates itself each time it starts.
 
 ## Credentials
 **Gelbooru, Rule34 and Pixiv: the key fetcher.**

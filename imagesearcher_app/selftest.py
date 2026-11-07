@@ -41,6 +41,7 @@ def selftest():
     r34 = eng("rule34")
     assert r34.api == "https://api.rule34.xxx" and r34.parse({"id": 1, "file_url": "f.jpg"})["page"].startswith("https://rule34.xxx/")
     assert r34.parse({"id": 1, "file_url": "f.jpg", "rating": "sensitive"})["rating"] == "s"
+    assert "hand_on_another's_chin" in r34.parse({"id": 1, "file_url": "f.jpg", "tags": "1boy hand_on_another&#039;s_chin"})["tags"]
     assert boorus.parse_gel_tags("x", b'<tags><tag type="4" count="3" name="miku" id="1"/></tags>') == [{"type": "4", "count": "3", "name": "miku", "id": "1"}]
     assert boorus.parse_gel_tags("x", b'{"@attributes":{}, "tag":[{"name":"a","count":1,"type":0}]}')[0]["name"] == "a"
 
@@ -221,6 +222,7 @@ def selftest():
     rdtest()
     looktest()
     imgtest()
+    updatetest()
     print("selftest ok")
 
 
@@ -845,6 +847,39 @@ def imgtest():
         img = QImage(9000, 8000, QImage.Format_RGB32)  # needs 274 MB, over Qt's default limit
         img.fill(0x3366cc)
         assert img.save(str(good), "PNG", 100) and not widgets.decode_original(good).isNull()
+
+
+def updatetest():
+    """The launcher: a clone fast-forwards, local edits and a folder without .git are left alone."""
+    import importlib.util
+    import shutil
+    import subprocess
+    if not shutil.which("git"):
+        return
+    spec = importlib.util.spec_from_file_location("launcher", Path(__file__).parent.parent / "imagesearcher.py")
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+
+    def git(folder, *a):
+        subprocess.run(["git", "-C", str(folder), "-c", "user.name=t", "-c", "user.email=t@t", *a], check=True, capture_output=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        up, me, plain = Path(tmp, "up"), Path(tmp, "me"), Path(tmp, "plain")
+        up.mkdir(), plain.mkdir()
+        git(up, "init", "-q")
+        (up / "f").write_text("1")
+        git(up, "add", "f")
+        git(up, "commit", "-qm", "1")
+        git(tmp, "clone", "-q", str(up), str(me))
+        (up / "f").write_text("2")
+        git(up, "commit", "-qam", "2")
+        launcher.update(str(me))
+        assert (me / "f").read_text() == "2"
+        (up / "f").write_text("3")
+        git(up, "commit", "-qam", "3")
+        (me / "f").write_text("mine")  # would be overwritten, so git refuses and the app starts anyway
+        launcher.update(str(me))
+        assert (me / "f").read_text() == "mine"
+        launcher.update(str(plain))
 
 
 def looktest():

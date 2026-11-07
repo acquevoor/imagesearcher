@@ -2,6 +2,7 @@
 
 Every engine has search(); the optional features (complete, tags, count, wiki, related, pools, artist,
 find_pixiv) are plain methods a subclass may define, and the UI only shows what has(feature) reports."""
+import html
 import json
 import re
 import urllib.error
@@ -153,7 +154,7 @@ class Gelbooru(Engine):
         if not p.get("file_url"):
             return None
         sample = p.get("sample_url") if p.get("sample") and p.get("sample_url") else p["file_url"]
-        return make_post(self.id, p["id"], p.get("preview_url"), [p["file_url"]], [sample], p.get("tags", "").split(),
+        return make_post(self.id, p["id"], p.get("preview_url"), [p["file_url"]], [sample], html.unescape(p.get("tags", "")).split(),  # it sends hand_on_another&#039;s_chin
                          self.rating(p.get("rating")), f"{self.url}/index.php?page=post&s=view&id={p['id']}",
                          p.get("width", 0), p.get("height", 0), pixiv_id=px_id(p.get("source")), md5=p.get("md5") or p.get("hash") or "")
 
@@ -177,7 +178,7 @@ class Gelbooru(Engine):
                         orderby={"Count": "count", "Name": "name", "Newest": "date"}[order], order="ASC" if order == "Name" else "DESC")
         code = self.cat_code(cat)
         # ponytail: no server-side category filter, so a filtered page may come back short or empty
-        return [{"name": t["name"], "count": int(t.get("count", 0)), "cat": self.CATS.get(int(t.get("type", 0)), "general")}
+        return [{"name": html.unescape(t["name"]), "count": int(t.get("count", 0)), "cat": self.CATS.get(int(t.get("type", 0)), "general")}
                 for t in parse_gel_tags(self.name, body) if code is None or int(t.get("type", 0)) == code]
 
     def count(self, q):
