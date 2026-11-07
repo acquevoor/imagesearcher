@@ -15,7 +15,16 @@ Browser and downloader in two sections:
 
 PySide6 + Python stdlib.
 
-    nix run github:acquevoor/imagesearcher
+## Which way to run it
+| You're on | Do this |
+|---|---|
+| **Linux** (including Bazzite, SteamOS, Fedora Atomic) | Download the **AppImage** from Releases: nothing to install. See [Linux AppImage](#linux-appimage-no-install). |
+| **Windows** | Install Python, then double-click `imagesearcher.py`. See [Windows](#windows-no-terminal-needed). |
+| **NixOS / Nix** | `nix run github:acquevoor/imagesearcher` |
+| **Linux with Python, from source** | `python3 imagesearcher.py` in this folder. It installs PySide6 with pip on first run. |
+
+`imagesearcher.py` is the only file you start. The files in `appimage/` are build tools, not the app.
+
     nix flake check            # runs the offline --selftest
 
 ## Install via flake

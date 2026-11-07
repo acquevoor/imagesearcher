@@ -51,4 +51,8 @@ def main(appdir):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        sys.exit("This is a build tool for the AppImage, not the app.\n"
+                 "To run the app, download the AppImage from the Releases page, or run: python3 imagesearcher.py\n"
+                 "(from the folder above this one). See the README.")
     main(sys.argv[1])
