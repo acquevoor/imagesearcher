@@ -818,6 +818,17 @@ def imgtest():
             assert "cut off" in str(e) and not list(Path(tmp).iterdir())
         finally:
             core.open_url = orig
+        R.headers = {"Content-Type": "text/html; charset=UTF-8"}
+        core.open_url = lambda url, timeout=30: R(b"<!doctype html>")
+        try:
+            core.fetch_file("u", Path(tmp, "page.jpg"))
+            raise AssertionError("a web page must not be saved as an image")
+        except OSError as e:
+            assert "web page" in str(e) and not list(Path(tmp).iterdir())
+        finally:
+            core.open_url = orig
+        assert core.referer("https://img4.gelbooru.com/images/a.jpg") == "https://gelbooru.com/"
+        assert core.referer("https://i.pximg.net/a.jpg") == core.PIXIV_REFERER and not core.referer("https://example.com/a.jpg")
         cache = Path(tmp, "cache")
         cache.mkdir()
         bad = cache / "a.jpg"

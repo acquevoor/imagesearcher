@@ -20,6 +20,12 @@ VIDEO_EXT = {".mp4", ".webm", ".zip"}  # .zip = Danbooru ugoira, its sample is a
 THUMB = 180
 PIXIV_REFERER = "https://app-api.pixiv.net/"
 
+
+def referer(url):
+    """The Referer an image host wants, or "". Without it Gelbooru's image hosts redirect to hotlink.php, then a web page."""
+    host = urllib.parse.urlsplit(url).hostname or ""
+    return PIXIV_REFERER if host.endswith("pximg.net") else "https://gelbooru.com/" if host.endswith(".gelbooru.com") else ""
+
 CAT_COLOR = {"artist": "#e0474c", "copyright": "#b05ce6", "character": "#2fb344", "species": "#ed7d31",
              "general": "#3b8eea", "meta": "#e8a33d"}
 CJK = re.compile(r"[぀-ヿ㐀-鿿가-힯]")  # kana / kanji / hangul = a Pixiv-style tag
@@ -180,8 +186,8 @@ def open_url(url, data=None, headers=None, timeout=30):
     Bodies of POSTs are never logged (they carry tokens)."""
     host = urllib.parse.urlsplit(url).hostname or ""
     h = {"User-Agent": UA, **HOST_HEADERS.get(host, {}), **(headers or {})}
-    if "pximg.net" in url:
-        h["Referer"] = PIXIV_REFERER
+    if referer(url):
+        h["Referer"] = referer(url)
     method, t0, lvl = "POST" if data else "GET", time.monotonic(), net_level(url)
     try:
         r = urllib.request.urlopen(urllib.request.Request(url, data=data, headers=h), timeout=timeout)
@@ -345,7 +351,12 @@ def fetch_file(url, path):
         tmp = path.with_name(f"{path.name}.{threading.get_ident()}.part")
         with open_url(url, timeout=120) as r, open(tmp, "wb") as f:
             shutil.copyfileobj(r, f)
-            want = (getattr(r, "headers", None) or {}).get("Content-Length")
+            headers = getattr(r, "headers", None) or {}
+            want = headers.get("Content-Length")
+            if (headers.get("Content-Type") or "").startswith("text/html"):  # or bulk saves a page as .jpg
+                f.close()
+                tmp.unlink()
+                raise OSError(f"the server sent a web page instead of {path.name}")
         if want and tmp.stat().st_size != int(want):  # a dropped connection reads as a normal end of file
             got = tmp.stat().st_size
             tmp.unlink()
@@ -402,13 +413,12 @@ def download_post(post, root, query, cancel=None):
             skip += 1
             continue
         d.parent.mkdir(parents=True, exist_ok=True)
-        tmp = d.with_name(d.name + ".part")
         if c := cached(root, post, i):  # already opened or favorited: copy instead of downloading again
+            tmp = d.with_name(d.name + ".part")
             shutil.copyfile(c, tmp)
+            tmp.rename(d)
         else:
-            with open_url(url, timeout=120) as r, open(tmp, "wb") as f:
-                shutil.copyfileobj(r, f)
-        tmp.rename(d)
+            fetch_file(url, d)
         new += 1
     return new, skip
 
