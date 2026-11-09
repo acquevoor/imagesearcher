@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 from . import boorus, bridge
 from .boorus import BooruSource, PixivMatchSource
 from .core import CAT_COLOR, CJK, PRESETS, SITE_FIELDS, fetch_all, log, rating_ok, run, save_conf
-from .widgets import Feed, Grid, Section, link, middle_click, rich_label, unlink
+from .widgets import Favorites, Feed, Section, link, middle_click, rich_label, unlink
 
 
 class BooruSection(Section):
@@ -31,7 +31,7 @@ class BooruSection(Section):
         self.tags_tab = self.add_fixed(TagsTab(self), "Tags", grid=False)
         self.new = NewFeed(self)
         self.add_fixed(self.new, "New")
-        self.favs = Grid(self.open_image)
+        self.favs = Favorites(self, lambda p: p["site"] not in ("pixiv", "x", "ib", "paw"))
         self.add_fixed(self.favs, "Favorites")
         self.refresh_favs()
 
@@ -146,12 +146,6 @@ class BooruSection(Section):
         run(lambda: bridge.pixiv_word(conf, e, q), lambda w, err: w and self.main.pixiv.search(w))
 
     # --- favorites / follows ---
-    def refresh_favs(self):
-        favs = [p for p in self.conf["favorites"] if p["site"] not in ("pixiv", "x", "ib", "paw")]
-        self.favs.restart()
-        self.favs.add(favs)
-        self.tabs.setTabText(self.tabs.indexOf(self.favs.imgtabs), f"Favorites ({len(favs)})")
-
     def toggle_follow(self, key):
         """Follow / unfollow "tag:x" or "artist:x" on the ticked sites -> now following? Starts at the newest post."""
         f = self.conf["follows"]

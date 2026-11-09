@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 
 from . import x
 from .core import allowed, dest, log, run, save_conf, to_ui
-from .widgets import Feed, Grid, LiveBulk, Section, rich_label
+from .widgets import Favorites, Feed, Grid, LiveBulk, Section, rich_label
 
 
 class XSection(Section):
@@ -50,7 +50,7 @@ class XSection(Section):
         self.timeline, self.discover = Ring(self, 1), Ring(self, 2)
         self.add_fixed(self.timeline, "Timeline")
         self.add_fixed(self.discover, "Discover")
-        self.favs = Grid(self.open_image)
+        self.favs = Favorites(self, lambda p: p["site"] == "x")
         self.add_fixed(self.favs, "Favorites")
         self.refresh_favs()
         QTimer(self, interval=5000, timeout=self.update_banner).start()
@@ -242,12 +242,6 @@ class XSection(Section):
 
     def tag_actions(self, tag, cat):
         return [("Open account", lambda: self.open_artist(handle=tag[5:]))] if tag.startswith("user:") else []
-
-    def refresh_favs(self):
-        favs = [p for p in self.conf["favorites"] if p["site"] == "x"]
-        self.favs.restart()
-        self.favs.add(favs)
-        self.tabs.setTabText(self.tabs.indexOf(self.favs.imgtabs), f"Favorites ({len(favs)})")
 
 
 class Ring(QWidget):

@@ -4,12 +4,13 @@ import html
 import subprocess
 import urllib.parse
 import webbrowser
+from collections import Counter
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QModelIndex, QObject, QRect, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QMimeData, QModelIndex, QObject, QRect, QSize, QStringListModel, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QFont, QIcon, QImage, QImageReader, QKeySequence, QPixmap, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QCompleter, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
+    QApplication, QComboBox, QCompleter, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
     QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QStyle, QStyledItemDelegate, QTabBar, QTabWidget, QTextBrowser,
     QTreeWidget, QVBoxLayout, QWidget,
 )
@@ -256,6 +257,70 @@ class Grid(QListWidget):
         run(fetch, done, "thumb")
 
 
+class WordCompleter(QCompleter):
+    """Completes the last space-separated word of a line edit (a leading - is kept)."""
+
+    def splitPath(self, path):
+        return [path.split(" ")[-1].lstrip("-")]
+
+    def pathFromIndex(self, index):
+        head, _, last = self.widget().text().rpartition(" ")
+        return f"{head} {'-' if last.startswith('-') else ''}{index.data()} ".lstrip()
+
+
+def fav_match(tags, text, cat=""):
+    """Favourites search: every word is part of some tag, no -word is, and cat (exact) is one of them."""
+    low, words = [t.lower() for t in tags], text.lower().split()
+    return ((not cat or cat in tags) and all(any(w in t for t in low) for w in words if w[0] != "-")
+            and not any(any(w[1:] in t for t in low) for w in words if w[0] == "-" and len(w) > 1))
+
+
+class Favorites(QWidget):
+    """A section's ♥ favourites, sorted into categories by their own tags: pick a category, or search with tags
+    (all must match; part of a tag is enough, -tag excludes)."""
+
+    def __init__(self, section, mine):
+        super().__init__()
+        self.section, self.mine, self.posts, self.imgtabs = section, mine, [], None
+        self.grid = Grid(section.open_image)
+        self.cat = QComboBox(toolTip="Category: favourites with this tag (the most used tags first)", minimumContentsLength=24)
+        self.cat.currentIndexChanged.connect(self.filter)
+        self.q = QLineEdit(placeholderText="search favourites by tag, e.g. blue_eyes -sketch", clearButtonEnabled=True)
+        typing = QTimer(self, singleShot=True, interval=200, timeout=self.filter)
+        self.q.textChanged.connect(typing.start)
+        self.q.setCompleter(WordCompleter(self.q, caseSensitivity=Qt.CaseInsensitive, filterMode=Qt.MatchContains))
+        row = QHBoxLayout()
+        for w, stretch in ((QLabel("category:"), 0), (self.cat, 0), (self.q, 1)):
+            row.addWidget(w, stretch)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addLayout(row)
+        lay.addWidget(self.grid, 1)
+
+    def refresh(self):
+        self.posts = [p for p in self.section.conf["favorites"] if self.mine(p)]
+        counts = Counter(t for p in self.posts for t in p["tags"])
+        top = [t for t, _ in counts.most_common()]
+        was = self.cat.currentData()
+        self.cat.blockSignals(True)
+        self.cat.clear()
+        self.cat.addItem(f"All ({len(self.posts)})", "")
+        for t in top[:300]:  # ponytail: the 300 most used tags; the search box reaches the rest
+            self.cat.addItem(f"{t} ({counts[t]})", t)
+        self.cat.setCurrentIndex(max(self.cat.findData(was), 0))
+        self.cat.blockSignals(False)
+        self.q.completer().setModel(QStringListModel(top, self.q.completer()))
+        self.filter()
+
+    def filter(self):
+        shown = [p for p in self.posts if fav_match(p["tags"], self.q.text(), self.cat.currentData())]
+        self.grid.restart()
+        self.grid.add(shown)
+        tabs = self.section.tabs
+        n = f"{len(shown)}/{len(self.posts)}" if len(shown) != len(self.posts) else len(self.posts)
+        tabs.setTabText(tabs.indexOf(self.imgtabs), f"Favorites ({n})")
+
+
 class Feed(QWidget):
     """A paged grid over Sources (core.Source), interleaved and cross-site deduped: every search / tag / list tab."""
 
@@ -394,16 +459,18 @@ class ImageTabs(QTabWidget):
 
 
 class Strip(QScrollArea):
-    """Every page of a multi-page work stacked top to bottom (manga reading), each shown as its original lands in cache/."""
+    """Every page of a multi-page work stacked top to bottom (manga reading), each shown as its original lands in cache/.
+    Zooming out (Ctrl+wheel, −/+) lays the pages out side by side, up to 8 a row."""
+    COLS = (1, 2, 3, 4, 6, 8)
 
     def __init__(self, root, post):
         super().__init__(widgetResizable=True)
         body = QWidget()
-        lay = QVBoxLayout(body)
-        self.labels, self.pix = [], {}
+        self.lay = QGridLayout(body)
+        self.labels, self.pix, self.cols = [], {}, 1
         for i in range(len(post["files"])):
             lab = QLabel(f"loading page {i + 1}…", alignment=Qt.AlignCenter)
-            lay.addWidget(lab)
+            self.lay.addWidget(lab, i, 0)
             self.labels.append(lab)
         self.setWidget(body)
         for i, url in enumerate(post["files"]):  # queued in order, so pages arrive top to bottom
@@ -421,7 +488,28 @@ class Strip(QScrollArea):
             pass
 
     def fit(self, i):
-        self.labels[i].setPixmap(self.pix[i].scaledToWidth(max(self.viewport().width() - 24, 100), Qt.SmoothTransformation))
+        w = (self.viewport().width() - 24 - self.lay.spacing() * (self.cols - 1)) // self.cols
+        self.labels[i].setPixmap(self.pix[i].scaledToWidth(max(w, 60), Qt.SmoothTransformation))
+
+    def zoom(self, step):
+        """step -1 = zoom out (more pages a row), +1 = in."""
+        at = self.COLS.index(self.cols)
+        cols = self.COLS[min(max(at - step, 0), len(self.COLS) - 1)]
+        if cols == self.cols:
+            return
+        top = next((i for i, lab in enumerate(self.labels) if lab.y() + lab.height() > self.verticalScrollBar().value()), 0)
+        self.cols = cols
+        for i, lab in enumerate(self.labels):
+            self.lay.addWidget(lab, i // cols, i % cols)  # re-adding moves it
+        for i in self.pix:
+            self.fit(i)
+        QTimer.singleShot(0, lambda: self.ensureWidgetVisible(self.labels[top], 0, 0))  # keep the page you were on in view
+        self.window().statusBar().showMessage(f"strip view: {cols} page{'s' * (cols > 1)} a row")
+
+    def wheelEvent(self, e):
+        if e.modifiers() & Qt.ControlModifier:
+            return self.zoom(1 if e.angleDelta().y() > 0 else -1)
+        super().wheelEvent(e)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -479,18 +567,45 @@ class Viewer(QWidget):
         for key, fn in ((Qt.Key_Left, lambda: self.step(-1)), (Qt.Key_Right, lambda: self.step(1)),
                         (Qt.Key_PageUp, lambda: self.flip(-1)), (Qt.Key_PageDown, lambda: self.flip(1)),
                         (Qt.Key_D, self.download), (Qt.Key_C, self.copy), (Qt.Key_F, self.fav.click),
-                        (Qt.Key_B, self.toggle_site_fav)):
+                        (Qt.Key_B, self.toggle_site_fav), (Qt.Key_Minus, lambda: self.zoom_strip(-1)),
+                        (Qt.Key_Plus, lambda: self.zoom_strip(1)), (Qt.Key_Equal, lambda: self.zoom_strip(1))):
             QShortcut(QKeySequence(key), self, fn).setContext(Qt.WidgetWithChildrenShortcut)  # only in the visible image tab
 
     def download(self):
         self.main.download(self.p, self.grid.feed.label if self.grid.feed else "favorites")
 
     def copy(self):
-        """The picture on screen: the original once it's in, a video's or animation's current frame."""
+        """The picture on screen: the original once it's in, a video's current frame; a Pixiv animation as a GIF."""
+        if self.p.get("ugoira") and self.frames:
+            return self.copy_gif()
         if not self.pix:
             return self.main.statusBar().showMessage("Nothing to copy yet: the image is still loading")
         QApplication.clipboard().setPixmap(self.pix)
         self.main.statusBar().showMessage(f"Copied {self.pix.width()}x{self.pix.height()} image" + ("" if self.hd else " (the original isn't in yet)"))
+
+    def copy_gif(self):
+        """The GIF goes on the clipboard twice: as image/gif and as a file (chat apps take the file, image editors the data)."""
+        frames, path, bar = [(pix.toImage(), d) for pix, d in self.frames], local(self.main.conf["download_dir"], self.p, 0, "cache").with_suffix(".gif"), self.main.statusBar()
+        bar.showMessage(f"Making a GIF of {len(frames)} frames…")
+
+        def make():
+            data = pixiv.gif(frames)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            return data
+
+        def done(data, err):
+            if err:
+                log.warning("copy gif #%s failed: %s", self.p["id"], err)
+                return bar.showMessage(f"Copy failed: {err}")
+            m = QMimeData()
+            m.setData("image/gif", data)
+            m.setUrls([QUrl.fromLocalFile(str(path))])
+            m.setData("x-special/gnome-copied-files", f"copy\n{QUrl.fromLocalFile(str(path)).toString()}".encode())
+            QApplication.clipboard().setMimeData(m)
+            log.info("copied ugoira #%s as a %d kB GIF", self.p["id"], len(data) // 1024)
+            bar.showMessage(f"Copied the animation as a GIF ({len(frames)} frames, {len(data) // 1024} kB)")
+        run(make, done)
 
     def toggle_site_fav(self):
         def changed(new):
@@ -607,6 +722,10 @@ class Viewer(QWidget):
         self.strip_on = not self.strip_on
         self.load()
 
+    def zoom_strip(self, step):
+        if isinstance(self.stack.currentWidget(), Strip):
+            self.stack.currentWidget().zoom(step)
+
     def show_strip(self):
         old = self.stack.widget(1)
         if old:
@@ -615,7 +734,7 @@ class Viewer(QWidget):
         self.stack.addWidget(Strip(self.main.conf["download_dir"], self.p))
         self.stack.setCurrentIndex(1)
         self.strip_btn.setText("◫ Single page")
-        self.quality.setText(f"strip view, {len(self.p['files'])} pages")
+        self.quality.setText(f"strip view, {len(self.p['files'])} pages (Ctrl+wheel or −/+ to zoom out)")
 
     def prefetch(self, root):
         """Pull the next post's original into cache/ so → opens it straight from disk."""
@@ -721,6 +840,9 @@ class Section(QWidget):
         self.refresh_saved()
 
     # --- tabs ---
+    def refresh_favs(self):
+        self.favs.refresh()
+
     def add_fixed(self, widget, title, grid=True):
         w = ImageTabs(self, widget) if grid else widget
         self.tabs.addTab(w, title)

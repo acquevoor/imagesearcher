@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 
 from . import pixiv
 from .core import log, run, save_conf
-from .widgets import Feed, Grid, Section, rich_label
+from .widgets import Favorites, Feed, Section, rich_label
 
 
 class Lazy(Feed):
@@ -62,7 +62,7 @@ class PixivSection(Section):
         self.following = Following(self)
         self.add_fixed(self.following, "Following")
         self.add_fixed(Bookmarks(self), "Bookmarks")
-        self.favs = Grid(self.open_image)
+        self.favs = Favorites(self, lambda p: p["site"] == "pixiv")
         self.add_fixed(self.favs, "Favorites")
         self.refresh_favs()
 
@@ -145,12 +145,6 @@ class PixivSection(Section):
 
     def site_fav_marked(self, p, on):
         return {**p, "bookmarked": on, "bookmarks": max(0, p.get("bookmarks", 0) + (1 if on else -1))}
-
-    def refresh_favs(self):
-        favs = [p for p in self.conf["favorites"] if p["site"] == "pixiv"]
-        self.favs.restart()
-        self.favs.add(favs)
-        self.tabs.setTabText(self.tabs.indexOf(self.favs.imgtabs), f"Favorites ({len(favs)})")
 
 
 class Recommended(Lazy):

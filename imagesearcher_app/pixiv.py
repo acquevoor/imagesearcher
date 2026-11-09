@@ -6,6 +6,7 @@ import io
 import json
 import re
 import secrets
+import struct
 import threading
 import time
 import urllib.error
@@ -275,6 +276,63 @@ def ugoira_frames(conf, iid):
     url, frames = ugoira(conf, iid)
     with zipfile.ZipFile(io.BytesIO(http(url))) as z:
         return [(QImage.fromData(z.read(f)), d) for f, d in frames]
+
+
+def lzw(data):
+    """GIF's LZW for 8-bit pixels: 9..12-bit codes, packed low bit first, a clear code when the table fills."""
+    out, bits, nbits, size, table, nxt = bytearray(), 256, 9, 9, {}, 258  # starts with the clear code (256)
+    prefix = data[0]
+    for b in data[1:]:
+        k = prefix << 8 | b
+        c = table.get(k)
+        if c is not None:
+            prefix = c
+            continue
+        bits |= prefix << nbits
+        nbits += size
+        while nbits >= 8:
+            out.append(bits & 255)
+            bits >>= 8
+            nbits -= 8
+        if nxt < 4096:
+            table[k] = nxt
+            if nxt == 1 << size:  # the decoder widens one entry later, as it reads this
+                size += 1
+            nxt += 1
+        else:
+            bits |= 256 << nbits
+            nbits += size
+            table, nxt, size = {}, 258, 9
+        prefix = b
+    for c in (prefix, 257):  # last string, end code
+        bits |= c << nbits
+        nbits += size
+        while nbits >= 8:
+            out.append(bits & 255)
+            bits >>= 8
+            nbits -= 8
+        if c == prefix and nxt < 4096 and nxt == 1 << size:  # the decoder counts this last entry too
+            size += 1
+    if nbits:
+        out.append(bits & 255)
+    return bytes(out)
+
+
+def gif(frames):
+    """Animated GIF (looping) from (QImage, delay ms) frames: Qt reads GIFs but can't write them.
+    ponytail: Qt's own 256-colour conversion per frame (a dithered colour cube on busy frames), pure-Python LZW
+    (a few seconds for a typical ugoira); a better palette needs a quantiser library"""
+    w, h = frames[0][0].width(), frames[0][0].height()
+    out = bytearray(b"GIF89a" + struct.pack("<HHBBB", w, h, 0, 0, 0) + b"\x21\xff\x0bNETSCAPE2.0\x03\x01\x00\x00\x00")
+    for img, ms in frames:
+        q = img.convertToFormat(QImage.Format_RGB32).scaled(w, h).convertToFormat(QImage.Format_Indexed8)
+        pal = b"".join(struct.pack("BBB", (c >> 16) & 255, (c >> 8) & 255, c & 255) for c in q.colorTable())
+        bpl, raw = q.bytesPerLine(), bytes(q.constBits())
+        data = lzw(b"".join(raw[y * bpl:y * bpl + w] for y in range(h)))
+        out += b"\x21\xf9\x04\x00" + struct.pack("<H", max(2, round(ms / 10))) + b"\x00\x00"
+        out += b"\x2c" + struct.pack("<HHHHB", 0, 0, w, h, 0x87) + pal.ljust(768, b"\x00") + b"\x08"
+        out += b"".join(bytes([len(data[i:i + 255])]) + data[i:i + 255] for i in range(0, len(data), 255)) + b"\x00"
+    return bytes(out + b"\x3b")
 
 
 def download_ugoira(conf, post, root, query):

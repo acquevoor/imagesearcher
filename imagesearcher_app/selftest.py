@@ -849,6 +849,29 @@ def imgtest():
         img.fill(0x3366cc)
         assert img.save(str(good), "PNG", 100) and not widgets.decode_original(good).isNull()
 
+    # copying a Pixiv animation: the GIF decodes back to the same frames (random pixels fill the LZW table: clear codes)
+    import random
+    r = random.Random(3)
+    noise = QImage(bytes(r.randrange(256) for _ in range(150 * 120 * 4)), 150, 120, QImage.Format_RGB32).copy()
+    flat = QImage(150, 120, QImage.Format_RGB32)
+    flat.fill(0x3366cc)
+    reader = QImageReader()
+    from PySide6.QtCore import QBuffer, QByteArray
+    buf = QBuffer()
+    buf.setData(QByteArray(pixiv.gif([(noise, 70), (flat, 5)])))
+    reader.setDevice(buf)
+    for want, delay in ((noise, 70), (flat, 20)):  # GIF delays are in 1/100 s, 2 at least
+        got = reader.read()
+        assert got.convertToFormat(QImage.Format_RGB32) == want.convertToFormat(QImage.Format_Indexed8).convertToFormat(QImage.Format_RGB32)
+        assert reader.nextImageDelay() == delay, reader.nextImageDelay()
+    assert not reader.canRead() and reader.loopCount() == -1
+
+    # favourites search
+    tags = ["blue_eyes", "1girl", "Hatsune_Miku"]
+    assert widgets.fav_match(tags, "blue miku") and widgets.fav_match(tags, "") and widgets.fav_match(tags, "1girl -sketch -")
+    assert not widgets.fav_match(tags, "blue -eyes") and not widgets.fav_match(tags, "red") and widgets.fav_match(tags, "", "1girl")
+    assert not widgets.fav_match(tags, "", "girl")
+
 
 def favtest():
     """★ site favourites: each engine's request, the 'already there' and 'login expired' answers; the remembered list;

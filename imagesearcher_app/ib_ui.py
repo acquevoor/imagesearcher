@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 from . import imageboard as ib
 from .core import allowed, log, run, save_conf, to_ui
 from .keys import web
-from .widgets import Feed, Grid, LiveBulk, Section, rich_label
+from .widgets import Favorites, Feed, Grid, LiveBulk, Section, rich_label
 
 
 class IBSection(Section):
@@ -51,7 +51,7 @@ class IBSection(Section):
             self.add_fixed(t, f"/{b}/")
         self.watched = WatchTab(self)
         self.add_fixed(self.watched, "Watched")
-        self.favs = Grid(self.open_image)
+        self.favs = Favorites(self, lambda p: p["site"] == "ib")
         self.add_fixed(self.favs, "Favorites")
         self.refresh_favs()
 
@@ -109,12 +109,6 @@ class IBSection(Section):
         if tag.startswith("file:"):
             return [("Search this filename", lambda: self.search(q="", filename=tag[5:]))]
         return []
-
-    def refresh_favs(self):
-        favs = [p for p in self.conf["favorites"] if p["site"] == "ib"]
-        self.favs.restart()
-        self.favs.add(favs)
-        self.tabs.setTabText(self.tabs.indexOf(self.favs.imgtabs), f"Favorites ({len(favs)})")
 
     # --- thread bulk ---
     def bulk_thread(self, board, num, posts, info):

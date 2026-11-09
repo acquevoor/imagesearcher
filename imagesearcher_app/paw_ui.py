@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 
 from . import pawchive as pw
 from .core import log, run, save_conf
-from .widgets import Feed, Grid, LiveBulk, Section, middle_click, rich_label
+from .widgets import Favorites, Feed, LiveBulk, Section, middle_click, rich_label
 
 
 class PawSection(Section):
@@ -40,7 +40,7 @@ class PawSection(Section):
         self.add_fixed(self.artists, "Artists", grid=False)
         self.tags_tab = Tags(self)
         self.add_fixed(self.tags_tab, "Tags", grid=False)
-        self.favs = Grid(self.open_image)
+        self.favs = Favorites(self, lambda p: p["site"] == "paw")
         self.add_fixed(self.favs, "Favorites")
         self.account = Account(self)
         self.add_fixed(self.account, "Account")
@@ -130,12 +130,6 @@ class PawSection(Section):
         if tag.startswith(("creator:", "service:")):
             return []
         return [("Posts with this tag (site-wide)", lambda: self.open_tag_listing(tag))]
-
-    def refresh_favs(self):
-        favs = [p for p in self.conf["favorites"] if p["site"] == "paw"]
-        self.favs.restart()
-        self.favs.add(favs)
-        self.tabs.setTabText(self.tabs.indexOf(self.favs.imgtabs), f"Favorites ({len(favs)})")
 
     # --- details / account / moderation ---
     def details(self, p):
