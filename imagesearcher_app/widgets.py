@@ -2,6 +2,7 @@
 tab (Viewer, with a strip view for multi-page works) and Section, the search bar + top tab row each section is."""
 import html
 import subprocess
+import time
 import urllib.parse
 import webbrowser
 from collections import Counter
@@ -458,34 +459,110 @@ class ImageTabs(QTabWidget):
             w.setParent(None)  # freed by Python once pending image downloads let go of it
 
 
+SPIN, spinning = "◐◓◑◒", {}  # label -> text: labels showing a turning ◐ while their image downloads
+
+
+def spin(label, text=None):
+    """Show "◐ text" turning on label until it gets a picture; text None stops it."""
+    if text is None:
+        spinning.pop(label, None)
+        return
+    global SPIN_TIMER
+    spinning[label] = text
+    label.setText(f"{SPIN[0]}  {text}")
+    if SPIN_TIMER is None:
+        SPIN_TIMER = QTimer(timeout=spin_tick)
+    if not SPIN_TIMER.isActive():
+        SPIN_TIMER.start(150)
+
+
+def spin_tick():
+    frame = SPIN[int(time.monotonic() * 6) % len(SPIN)]
+    for label, text in list(spinning.items()):
+        try:
+            label.setText(f"{frame}  {text}")
+        except RuntimeError:  # label gone with its tab
+            spinning.pop(label)
+    if not spinning:
+        SPIN_TIMER.stop()
+
+
+SPIN_TIMER = None  # made on first use: a QTimer needs the QApplication
+
+
+def copy_files(paths, image=None):
+    """Clipboard: the files (chat apps and file managers paste these), plus the picture itself when there's one."""
+    m = QMimeData()
+    if image is not None:
+        m.setImageData(image)
+    urls = [QUrl.fromLocalFile(str(p)) for p in paths]
+    m.setUrls(urls)
+    m.setData("x-special/gnome-copied-files", ("copy\n" + "\n".join(u.toString() for u in urls)).encode())
+    return m
+
+
 class Strip(QScrollArea):
     """Every page of a multi-page work stacked top to bottom (manga reading), each shown as its original lands in cache/.
-    Zooming out (Ctrl+wheel, −/+) lays the pages out side by side, up to 8 a row."""
+    Zooming out (Ctrl+wheel, −/+) lays the pages out side by side, up to 8 a row. Click a page to copy it,
+    Shift+click copies the range from the last click, Ctrl+click adds / removes one."""
     COLS = (1, 2, 3, 4, 6, 8)
 
-    def __init__(self, root, post):
+    def __init__(self, root, post, on_copy):
         super().__init__(widgetResizable=True)
         body = QWidget()
         self.lay = QGridLayout(body)
-        self.labels, self.pix, self.cols = [], {}, 1
+        self.labels, self.pix, self.paths, self.cols, self.sel, self.anchor, self.on_copy = [], {}, {}, 1, [], 0, on_copy
         for i in range(len(post["files"])):
-            lab = QLabel(f"loading page {i + 1}…", alignment=Qt.AlignCenter)
+            lab = QLabel(alignment=Qt.AlignCenter)
+            spin(lab, f"loading page {i + 1}…")
             self.lay.addWidget(lab, i, 0)
             self.labels.append(lab)
         self.setWidget(body)
-        for i, url in enumerate(post["files"]):  # queued in order, so pages arrive top to bottom
-            run(lambda i=i, url=url: decode_original(cached(root, post, i) or fetch_file(url, local(root, post, i, "cache"))),
-                lambda img, e, i=i: self.got(i, img, e), "view")
 
-    def got(self, i, img, err):
+        def get(i, url):
+            path = cached(root, post, i) or fetch_file(url, local(root, post, i, "cache"))
+            return path, decode_original(path)
+        for i, url in enumerate(post["files"]):  # queued in order, so pages arrive top to bottom
+            run(lambda i=i, url=url: get(i, url), lambda res, e, i=i: self.got(i, res, e), "view")
+
+    def got(self, i, res, err):
         try:
-            if err or img.isNull():
-                self.labels[i].setText(f"page {i + 1} failed: {why_failed(err)}")
+            spin(self.labels[i])
+            if err or res[1].isNull():
+                self.labels[i].setText(f"page {i + 1} failed: {why_failed(err)} (⟳ Reload / R tries again)")
             else:
-                self.pix[i] = QPixmap.fromImage(img)
+                self.paths[i], self.pix[i] = res[0], QPixmap.fromImage(res[1])
                 self.fit(i)
         except RuntimeError:  # strip closed meanwhile
             pass
+
+    def mousePressEvent(self, e):
+        body = self.widget()
+        lab = body.childAt(body.mapFrom(self.viewport(), e.position().toPoint()))
+        if e.button() != Qt.LeftButton or lab not in self.labels:
+            return super().mousePressEvent(e)
+        i, mods = self.labels.index(lab), e.modifiers()
+        if mods & Qt.ShiftModifier:
+            lo, hi = sorted((self.anchor, i))
+            self.sel = list(range(lo, hi + 1))
+        elif mods & Qt.ControlModifier:
+            self.sel = sorted(set(self.sel) ^ {i})
+            self.anchor = i
+        else:
+            self.sel, self.anchor = [i], i
+        for j, lb in enumerate(self.labels):
+            lb.setStyleSheet("border: 3px solid #3daee9;" if j in self.sel else "")
+        self.copy()
+
+    def copy(self):
+        """The selected pages that are in; -> status text."""
+        have = [i for i in self.sel if i in self.paths]
+        if not have:
+            return self.on_copy("Click a page to copy it (Shift+click: a range, Ctrl+click: add / remove)" if not self.sel else "Those pages are still loading")
+        QApplication.clipboard().setMimeData(copy_files([self.paths[i] for i in have], self.pix[have[0]].toImage() if len(have) == 1 else None))
+        left = len(self.sel) - len(have)
+        pages = f"page {have[0] + 1}" if len(have) == 1 else f"{len(have)} pages ({', '.join(str(i + 1) for i in have[:12])}{'…' if len(have) > 12 else ''}) as files"
+        self.on_copy(f"Copied {pages}" + (f"; {left} still loading, click again once in" if left else ""))
 
     def fit(self, i):
         w = (self.viewport().width() - 24 - self.lay.spacing() * (self.cols - 1)) // self.cols
@@ -553,7 +630,8 @@ class Viewer(QWidget):
         side = QVBoxLayout()
         side.addLayout(nav)
         for w in (self.pages, self.info, self.quality, QLabel("Tags (double-click = open tab, right-click = more)"), self.tags,
-                  btn("⬇ Download (D)", self.download), btn("📋 Copy image (C)", self.copy), self.fav, self.sfav, self.play, self.strip_btn):
+                  btn("⬇ Download (D)", self.download), btn("📋 Copy image (C)", self.copy), self.fav, self.sfav, self.play, self.strip_btn,
+                  btn("⟳ Reload (R)", self.reload)):
             side.addWidget(w)
         side.addLayout(self.extra)
         side.addWidget(btn("Open page", lambda: webbrowser.open(self.p["page"])))
@@ -566,10 +644,15 @@ class Viewer(QWidget):
 
         for key, fn in ((Qt.Key_Left, lambda: self.step(-1)), (Qt.Key_Right, lambda: self.step(1)),
                         (Qt.Key_PageUp, lambda: self.flip(-1)), (Qt.Key_PageDown, lambda: self.flip(1)),
-                        (Qt.Key_D, self.download), (Qt.Key_C, self.copy), (Qt.Key_F, self.fav.click),
+                        (Qt.Key_D, self.download), (Qt.Key_C, self.copy), (Qt.Key_R, self.reload), (Qt.Key_F, self.fav.click),
                         (Qt.Key_B, self.toggle_site_fav), (Qt.Key_Minus, lambda: self.zoom_strip(-1)),
                         (Qt.Key_Plus, lambda: self.zoom_strip(1)), (Qt.Key_Equal, lambda: self.zoom_strip(1))):
             QShortcut(QKeySequence(key), self, fn).setContext(Qt.WidgetWithChildrenShortcut)  # only in the visible image tab
+
+    def reload(self):
+        """Load this post again: what failed downloads again, what's in cache/ comes straight back."""
+        log.info("reload image %s #%s", self.p["site"], self.p["id"])
+        self.load()
 
     def download(self):
         self.main.download(self.p, self.grid.feed.label if self.grid.feed else "favorites")
@@ -578,6 +661,8 @@ class Viewer(QWidget):
         """The picture on screen: the original once it's in, a video's current frame; a Pixiv animation as a GIF."""
         if self.p.get("ugoira") and self.frames:
             return self.copy_gif()
+        if isinstance(self.stack.currentWidget(), Strip):
+            return self.stack.currentWidget().copy()
         if not self.pix:
             return self.main.statusBar().showMessage("Nothing to copy yet: the image is still loading")
         QApplication.clipboard().setPixmap(self.pix)
@@ -598,10 +683,8 @@ class Viewer(QWidget):
             if err:
                 log.warning("copy gif #%s failed: %s", self.p["id"], err)
                 return bar.showMessage(f"Copy failed: {err}")
-            m = QMimeData()
+            m = copy_files([path])
             m.setData("image/gif", data)
-            m.setUrls([QUrl.fromLocalFile(str(path))])
-            m.setData("x-special/gnome-copied-files", f"copy\n{QUrl.fromLocalFile(str(path)).toString()}".encode())
             QApplication.clipboard().setMimeData(m)
             log.info("copied ugoira #%s as a %d kB GIF", self.p["id"], len(data) // 1024)
             bar.showMessage(f"Copied the animation as a GIF ({len(frames)} frames, {len(data) // 1024} kB)")
@@ -675,6 +758,7 @@ class Viewer(QWidget):
         self.anim.stop()
         self.frames = []
         if self.strip_on and len(p["files"]) > 1:
+            spin(self.img)
             return self.show_strip()
         self.stack.setCurrentWidget(self.img)
         # the original is downloaded into cache/ (or favorites/) and shown from there; until it's in, the sample
@@ -684,17 +768,19 @@ class Viewer(QWidget):
         have = full and cached(root, p, pg)
         folder = "favorites" if self.main.is_fav(p) else "cache"
         key, self.pix, self.hd, self.fails = (pg, p["site"], p["id"]), None, False, 0
-        self.img.setText("loading…")
+        self.img.clear()
+        spin(self.img, "loading…")
         self.quality.setText("loading original…" if full else "")
 
         def done(img, err, original):
-            if not self.current(key) or self.frames or self.hd:
+            if not self.current(key) or self.frames or self.hd or self.stack.currentWidget() is not self.img:
                 return
             if err or img is None or img.isNull():
                 self.fails += 1
                 if original:
                     self.quality.setText(f"original failed: {why_failed(err)} — showing the sample")
                 if not self.pix and self.fails == (2 if full and not have else 1):
+                    spin(self.img)
                     self.img.setText(f"failed: {why_failed(err)}")
                     log.warning("image %s #%s didn't show: %s", self.p["site"], self.p["id"], why_failed(err))
                 return
@@ -731,7 +817,7 @@ class Viewer(QWidget):
         if old:
             self.stack.removeWidget(old)
             old.deleteLater()
-        self.stack.addWidget(Strip(self.main.conf["download_dir"], self.p))
+        self.stack.addWidget(Strip(self.main.conf["download_dir"], self.p, self.main.statusBar().showMessage))
         self.stack.setCurrentIndex(1)
         self.strip_btn.setText("◫ Single page")
         self.quality.setText(f"strip view, {len(self.p['files'])} pages (Ctrl+wheel or −/+ to zoom out)")
@@ -770,6 +856,7 @@ class Viewer(QWidget):
 
     def rescale(self):
         if self.pix:
+            spin(self.img)
             self.img.setPixmap(self.pix.scaled(self.img.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     def resizeEvent(self, e):
