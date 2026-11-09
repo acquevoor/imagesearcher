@@ -48,12 +48,13 @@ Includes a desktop entry. Without Nix: `python imagesearcher.py` with PySide6 in
   - Middle-click works the same on tags, tag lists, creator lists and links: the tab opens behind, you stay where you are.
   - In an image tab: ←/→ walk the grid, PgUp/PgDn flip pages, D download, C copy the image (a Pixiv animation is copied as a GIF), R reload (retries what failed), L copy the link, F favorite, B site favourite, Esc back to the grid, Ctrl+W close, Ctrl+Tab cycle.
 - **Copy link**: L on a selected thumbnail or in an image tab, the 🔗 button, or right-click a thumbnail → Copy link.
+- **Select several thumbnails** by click+dragging across them (or Ctrl / Shift+click, Ctrl+A). Right-click the selection to copy the images (as files) or the links (one per line), download them, ♥ or ★ them all, or open them in background tabs; C, L, F and B act on the whole selection too.
 - **Hotkeys** are configurable: ⚙ Settings → ⌨ Hotkeys… lists every shortcut; changes apply at once, open tabs included.
 - **Two kinds of favourite**, on every thumb's top-right corner (hover to see them) and as keys on the selected thumb or open image:
   - ♥ **F**: ImageSearcher's own favourite (the file goes in your favorites folder; works for every site).
   - ★ **B**: the site's own favourite, on your account there: Pixiv bookmarks, Danbooru / e621 / Moebooru favourites (your login + API key), Gelbooru / Rule34 favourites (log in through ⚙ → Fetch keys…: their API key can't do it, so the app keeps their login cookie in your private config), Pawchive favourites (pasted session). Not on X (read-only) or Imageboard.
   - Booru sites don't tell the app what you favourited on the website, so ★ shows filled only for what you favourited from here.
-  - Multi-page works get **▤ Strip view**: all pages stacked to scroll through, for manga. Ctrl+wheel or −/+ zooms out to up to 8 pages a row. Click a page to copy it; Shift+click copies the range from the last click, Ctrl+click adds or removes one (several pages are copied as files). Pages still loading show a turning ◐.
+  - Multi-page works get **▤ Strip view**: all pages stacked to scroll through, for manga. Ctrl+wheel or −/+ zooms out to up to 8 pages a row. Click a page to copy it; click+drag across pages (or Shift+click) copies the range, Ctrl+click adds or removes one (several pages are copied as files). Pages still loading show a turning ◐.
   - Each section's **Favorites** tab sorts your ♥ favourites into categories by their tags (the category box, most used tags first) and searches them by tag: every word must be part of a tag, `-word` excludes.
   - Opening an image downloads its original into `{download dir}/cache/` and shows it from there. The next image is fetched ahead, so → is instant. **`cache/` is deleted when the app closes.**
   - ♥ moves the post's originals into `{download dir}/favorites/`, next to `cache/`, and downloads any pages you haven't opened. Un-♥ moves them back to `cache/`.

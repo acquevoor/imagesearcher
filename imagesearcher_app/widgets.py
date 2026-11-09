@@ -185,6 +185,7 @@ class Grid(QListWidget):
         self.setGridSize(QSize(THUMB + 12, THUMB + 28))
         self.setResizeMode(QListWidget.Adjust)
         self.setMovement(QListWidget.Static)
+        self.setSelectionMode(QListWidget.ExtendedSelection)  # click+drag (or Ctrl / Shift+click) selects several
         self.setUniformItemSizes(True)
         self.blank = QPixmap(THUMB, THUMB)
         self.blank.fill(Qt.transparent)
@@ -232,24 +233,90 @@ class Grid(QListWidget):
         if not self.mark_at(e.position().toPoint())[0]:
             super().mouseDoubleClickEvent(e)
 
+    def chosen(self):
+        """The selected tiles in grid order, else the current one."""
+        its = sorted(self.selectedItems(), key=self.row) or [self.currentItem()]
+        return [it for it in its if it]
+
     def keyPressEvent(self, e):
-        it, main = self.currentItem(), self.main_window()
-        if it and main:
+        its, main = self.chosen(), self.main_window()
+        if its and main:
             if pressed(main.conf, e, "copy_link"):
-                return copy_link(main, it.data(Qt.UserRole))
+                return self.copy_links(its)
+            if pressed(main.conf, e, "copy"):
+                return self.copy_images(its)
             kind = next((k for a, k in (("fav", "fav"), ("site_fav", "site")) if pressed(main.conf, e, a)), None)
             if kind:
-                return self.toggle(it, kind)
+                return self.toggle_all(its, kind)
         super().keyPressEvent(e)
 
     def contextMenuEvent(self, e):
         it, main = self.itemAt(e.pos()), self.main_window()
         if not (it and main):
             return
-        p, m = it.data(Qt.UserRole), QMenu(self)
-        m.addAction(f"🔗 Copy link\t{key_text(main.conf, 'copy_link')}", lambda: copy_link(main, p))
-        m.addAction("Open page in browser", lambda: webbrowser.open(p["page"]))
+        if not it.isSelected():
+            self.setCurrentItem(it)  # right-click outside the selection: that tile alone
+        its, m, k = self.chosen(), QMenu(self), lambda a: key_text(main.conf, a)
+        n = f" ({len(its)})" if len(its) > 1 else ""
+        posts = [i.data(Qt.UserRole) for i in its]
+        site = main.owner(posts[0]).site_fav_state(posts[0]) is not None
+        m.addAction(f"📋 Copy image{'s' * (len(its) > 1)}{n}\t{k('copy')}", lambda: self.copy_images(its))
+        m.addAction(f"🔗 Copy link{'s' * (len(its) > 1)}{n}\t{k('copy_link')}", lambda: self.copy_links(its))
+        m.addAction(f"⬇ Download{n}", lambda: [main.download(p, self.feed.label if self.feed else "favorites") for p in posts])
+        m.addAction(f"♥ Favorite / unfavorite{n}\t{k('fav')}", lambda: self.toggle_all(its, "fav"))
+        if site:
+            m.addAction(f"★ {main.owner(posts[0]).SITE_FAV}{n}\t{k('site_fav')}", lambda: self.toggle_all(its, "site"))
+        m.addAction(f"Open in background tabs{n}", lambda: [in_background(self.on_open, self, self.row(i), True) for i in its])
+        m.addAction(f"Open page{'s' * (len(its) > 1)} in browser{n}", lambda: [webbrowser.open(p["page"]) for p in posts])
+        if len(its) > 1:
+            m.addSeparator()
+            m.addAction("Clear selection", self.clearSelection)
+        m.addAction("Select all\tCtrl+A", self.selectAll)
         m.exec(e.globalPos())
+
+    def copy_links(self, its):
+        if len(its) == 1:
+            return copy_link(self.main_window(), its[0].data(Qt.UserRole))
+        QApplication.clipboard().setText("\n".join(it.data(Qt.UserRole)["page"] for it in its))
+        self.main_window().statusBar().showMessage(f"Copied {len(its)} links, one per line")
+
+    def copy_images(self, its):
+        """The originals (first page of each), downloaded into cache/ when not there yet, as files; one also as the picture."""
+        main = self.main_window()
+        posts, root = [it.data(Qt.UserRole) for it in its], main.conf["download_dir"]
+        main.statusBar().showMessage(f"Getting {len(posts)} original{'s' * (len(posts) > 1)} to copy…")
+
+        def get():
+            return [cached(root, p, 0) or fetch_file(p["files"][0], local(root, p, 0, "cache")) for p in posts]
+
+        def done(paths, err):
+            if err:
+                return main.statusBar().showMessage(f"Copy failed: {why_failed(err)}")
+            one = QImage(str(paths[0])) if len(paths) == 1 else None
+            QApplication.clipboard().setMimeData(copy_files(paths, one if one is not None and not one.isNull() else None))
+            log.info("copied %d image(s) from the grid", len(paths))
+            main.statusBar().showMessage(f"Copied {len(paths)} image{'s as files' if len(paths) > 1 else ''}")
+        run(get, done, "view")
+
+    def toggle_all(self, its, kind):
+        """♥: all on unless they all are already (then all off); ★ likewise, one site request each."""
+        main = self.main_window()
+        if len(its) == 1:
+            return self.toggle(its[0], kind)
+        posts = [it.data(Qt.UserRole) for it in its]
+        state = main.is_fav if kind == "fav" else (lambda p: main.owner(p).site_fav_state(p))
+        on = not all(state(p) for p in posts)
+        for it, p in zip(its, posts):
+            if state(p) is None or bool(state(p)) == on:
+                continue
+            if kind == "fav":  # by post: ♥ in the Favorites tab rebuilds that grid, tiles and all
+                main.toggle_fav(p)
+            else:
+                self.toggle(it, kind)
+        if kind == "fav":
+            for g in main.findChildren(Grid):
+                g.viewport().update()
+        main.statusBar().showMessage(f"{'♥' if kind == 'fav' else '★'} {'added' if on else 'removed'}: {len(its)} posts")
 
     def toggle(self, it, kind):
         main, p = self.main_window(), it.data(Qt.UserRole)
@@ -555,7 +622,7 @@ def copy_files(paths, image=None):
 class Strip(QScrollArea):
     """Every page of a multi-page work stacked top to bottom (manga reading), each shown as its original lands in cache/.
     Zooming out (Ctrl+wheel, −/+) lays the pages out side by side, up to 8 a row. Click a page to copy it,
-    Shift+click copies the range from the last click, Ctrl+click adds / removes one."""
+    click+drag across pages (or Shift+click) copies the range, Ctrl+click adds / removes one."""
     COLS = (1, 2, 3, 4, 6, 8)
 
     def __init__(self, root, post, on_copy):
@@ -563,6 +630,7 @@ class Strip(QScrollArea):
         body = QWidget()
         self.lay = QGridLayout(body)
         self.labels, self.pix, self.paths, self.cols, self.sel, self.anchor, self.on_copy = [], {}, {}, 1, [], 0, on_copy
+        self.dragging = False
         for i in range(len(post["files"])):
             lab = QLabel(alignment=Qt.AlignCenter)
             spin(lab, f"loading page {i + 1}…")
@@ -587,29 +655,49 @@ class Strip(QScrollArea):
         except RuntimeError:  # strip closed meanwhile
             pass
 
-    def mousePressEvent(self, e):
+    def page_at(self, pos):
         body = self.widget()
-        lab = body.childAt(body.mapFrom(self.viewport(), e.position().toPoint()))
-        if e.button() != Qt.LeftButton or lab not in self.labels:
+        lab = body.childAt(body.mapFrom(self.viewport(), pos))
+        return self.labels.index(lab) if lab in self.labels else None
+
+    def mousePressEvent(self, e):
+        i = self.page_at(e.position().toPoint()) if e.button() == Qt.LeftButton else None
+        if i is None:
             return super().mousePressEvent(e)
-        i, mods = self.labels.index(lab), e.modifiers()
-        if mods & Qt.ShiftModifier:
-            lo, hi = sorted((self.anchor, i))
-            self.sel = list(range(lo, hi + 1))
-        elif mods & Qt.ControlModifier:
-            self.sel = sorted(set(self.sel) ^ {i})
+        if e.modifiers() & Qt.ShiftModifier:
+            self.select(range(min(self.anchor, i), max(self.anchor, i) + 1))
+        elif e.modifiers() & Qt.ControlModifier:
+            self.select(set(self.sel) ^ {i})
             self.anchor = i
         else:
-            self.sel, self.anchor = [i], i
+            self.anchor = i
+            self.select([i])
+        self.dragging = True
+
+    def mouseMoveEvent(self, e):
+        """Click+drag across pages selects them all."""
+        i = self.page_at(e.position().toPoint()) if self.dragging else None
+        if i is not None:
+            self.select(range(min(self.anchor, i), max(self.anchor, i) + 1))
+            self.ensureVisible(e.position().x() + self.horizontalScrollBar().value(), e.position().y() + self.verticalScrollBar().value(), 0, 40)
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self.dragging:
+            self.dragging = False
+            self.copy()
+        super().mouseReleaseEvent(e)
+
+    def select(self, pages):
+        self.sel = sorted(pages)
         for j, lb in enumerate(self.labels):
             lb.setStyleSheet("border: 3px solid #3daee9;" if j in self.sel else "")
-        self.copy()
 
     def copy(self):
         """The selected pages that are in; -> status text."""
         have = [i for i in self.sel if i in self.paths]
         if not have:
-            return self.on_copy("Click a page to copy it (Shift+click: a range, Ctrl+click: add / remove)" if not self.sel else "Those pages are still loading")
+            return self.on_copy("Click a page to copy it (drag across pages: a range, Ctrl+click: add / remove)" if not self.sel else "Those pages are still loading")
         QApplication.clipboard().setMimeData(copy_files([self.paths[i] for i in have], self.pix[have[0]].toImage() if len(have) == 1 else None))
         left = len(self.sel) - len(have)
         pages = f"page {have[0] + 1}" if len(have) == 1 else f"{len(have)} pages ({', '.join(str(i + 1) for i in have[:12])}{'…' if len(have) > 12 else ''}) as files"

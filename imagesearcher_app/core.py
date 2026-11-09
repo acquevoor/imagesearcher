@@ -79,9 +79,9 @@ DEFAULTS = {
 HOTKEYS = {  # action -> (what it does, default key)
     "prev": ("Image: previous post", "Left"), "next": ("Image: next post", "Right"),
     "page_prev": ("Image: previous page", "PgUp"), "page_next": ("Image: next page", "PgDown"),
-    "download": ("Image: download", "D"), "copy": ("Image: copy the image / the selected strip pages", "C"),
-    "copy_link": ("Image or thumbnail: copy the link", "L"), "reload": ("Image: reload", "R"),
-    "fav": ("Image or thumbnail: ♥ favourite", "F"), "site_fav": ("Image or thumbnail: ★ site favourite", "B"),
+    "download": ("Image: download", "D"), "copy": ("Image or thumbnails: copy the image(s) / the selected strip pages", "C"),
+    "copy_link": ("Image or thumbnails: copy the link(s)", "L"), "reload": ("Image: reload", "R"),
+    "fav": ("Image or thumbnails: ♥ favourite", "F"), "site_fav": ("Image or thumbnails: ★ site favourite", "B"),
     "zoom_out": ("Strip view: zoom out", "-"), "zoom_in": ("Strip view: zoom in (= works too)", "+"),
     "to_grid": ("Image tabs: back to the grid", "Esc"), "close_tab": ("Image tabs: close the image", "Ctrl+W"),
     "next_tab": ("Image tabs: next", "Ctrl+Tab"), "prev_tab": ("Image tabs: previous", "Ctrl+Shift+Tab"),
