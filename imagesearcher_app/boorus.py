@@ -44,8 +44,22 @@ class Engine:
     def headers(self):
         return {}
 
-    def get(self, path, **params):
-        return get_json(f"{self.api}/{path}?" + qs(**params, **self.auth()), self.name, self.hint, headers=self.headers())
+    def get(self, path, timeout=30, **params):
+        return get_json(f"{self.api}/{path}?" + qs(**params, **self.auth()), self.name, self.hint, headers=self.headers(), timeout=timeout)
+
+    def write(self, method, path, **params):
+        """POST / DELETE an account action (site favourites) with the login + key."""
+        return get_json(f"{self.api}/{path}?" + qs(**params, **self.auth()), self.name, self.hint, headers=self.headers(),
+                        data=b"" if method == "POST" else None, method=method)
+
+    def add_or_remove(self, pid, on, add, remove):
+        """add / remove: (method, path, params). Adding one that's already there counts as done."""
+        try:
+            method, path, params = add if on else remove
+            self.write(method, path, **params)
+        except RuntimeError as e:
+            if not (on and "HTTP 422" in str(e)):  # Danbooru / e621: "You have already favorited this post"
+                raise
 
     def join(self, *parts):
         return " ".join(p for p in parts if p)
@@ -86,8 +100,11 @@ class Danbooru(Engine):
                          pixiv_id=str(p["pixiv_id"]) if p.get("pixiv_id") else px_id(p.get("source")), md5=p.get("md5", ""),
                          cats={c: p.get(f"tag_string_{c}", "").split() for c in ("artist", "copyright", "character", "general", "meta")})
 
+    def favorite(self, pid, on):
+        self.add_or_remove(pid, on, ("POST", "favorites.json", {"post_id": pid}), ("DELETE", f"favorites/{pid}.json", {}))
+
     def complete(self, word):
-        res = self.get("autocomplete.json", **{"search[query]": word, "search[type]": "tag_query", "limit": 15})
+        res = self.get("autocomplete.json", timeout=4, **{"search[query]": word, "search[type]": "tag_query", "limit": 15})
         return [(t["value"], f"{t['value']}  ({t.get('post_count', 0)})") for t in res or []]
 
     def tags(self, pattern, cat, order, page):
@@ -160,12 +177,23 @@ class Gelbooru(Engine):
 
     def complete(self, word):
         try:  # Gelbooru itself
-            res = self.get("index.php", page="autocomplete2", term=word, type="tag_query", limit=15)
+            res = self.get("index.php", timeout=4, page="autocomplete2", term=word, type="tag_query", limit=15)
         except RuntimeError:
             res = None
         if not isinstance(res, list):  # the other 0.2 sites
-            res = get_json(f"{self.api}/autocomplete.php?" + qs(q=word), self.name) or []
+            res = get_json(f"{self.api}/autocomplete.php?" + qs(q=word), self.name, timeout=4) or []
         return [(t["value"], t.get("label") or t["value"]) for t in res if t.get("value")]
+
+    def favorite(self, pid, on):
+        """The API key can't do this: the same request the site's own page makes, with your login cookies. addfav.php
+        answers 1 = already in your favourites, 2 = not logged in, anything else = added."""
+        if not self.site.get("cookie"):
+            raise RuntimeError(f"{self.name}: log in for site favourites (⚙ Settings → Fetch keys… → Fetch again)")
+        h = {"Cookie": self.site["cookie"], "Referer": f"{self.url}/"}
+        if not on:
+            http(f"{self.url}/index.php?" + qs(page="favorites", s="delete", id=pid), headers=h)
+        elif http(f"{self.url}/public/addfav.php?" + qs(id=pid), headers=h).strip() == b"2":
+            raise RuntimeError(f"{self.name}: your saved login expired (⚙ Settings → Fetch keys… → Fetch again)")
 
     def raw(self, **params):
         try:
@@ -215,8 +243,11 @@ class Moebooru(Engine):
                          p.get("tags", "").split(), self.rating(p.get("rating")), f"{self.url}/post/show/{p['id']}",
                          p.get("width", 0), p.get("height", 0), pixiv_id=px_id(p.get("source")), md5=p.get("md5", ""))
 
+    def favorite(self, pid, on):  # score 3 = favourite, 0 = no vote
+        self.write("POST", "post/vote.json", id=pid, score=3 if on else 0)
+
     def complete(self, word):
-        return [(t["name"], f"{t['name']}  ({t['count']})") for t in self.get("tag.json", name=f"{word}*", order="count", limit=15) or []]
+        return [(t["name"], f"{t['name']}  ({t['count']})") for t in self.get("tag.json", timeout=4, name=f"{word}*", order="count", limit=15) or []]
 
     def tags(self, pattern, cat, order, page):
         rows = self.get("tag.json", name=pattern or "*", type=self.cat_code(cat), page=page, limit=40,
@@ -278,8 +309,11 @@ class E621(Engine):
                          self.rating(p.get("rating")), f"{self.url}/posts/{p['id']}", p["file"].get("width", 0), p["file"].get("height", 0),
                          pixiv_id=next(filter(None, map(px_id, p.get("sources", []))), None), md5=p["file"].get("md5", ""), cats=cats)
 
+    def favorite(self, pid, on):
+        self.add_or_remove(pid, on, ("POST", "favorites.json", {"post_id": pid}), ("DELETE", f"favorites/{pid}.json", {}))
+
     def complete(self, word):
-        res = self.get("tags/autocomplete.json", **{"search[name_matches]": word, "expiry": 7})
+        res = self.get("tags/autocomplete.json", timeout=4, **{"search[name_matches]": word, "expiry": 7})
         return [(t["name"], f"{t['name']}  ({t['post_count']})") for t in res or []]
 
     def tags(self, pattern, cat, order, page):
@@ -365,7 +399,7 @@ class Philomena(Engine):
                          pixiv_id=next(filter(None, map(px_id, sources)), None), cats=cats)
 
     def complete(self, word):
-        res = self.get("api/v1/json/search/tags", q=f"{word.replace('_', ' ')}*", sf="images", sd="desc", per_page=15) or {}
+        res = self.get("api/v1/json/search/tags", timeout=4, q=f"{word.replace('_', ' ')}*", sf="images", sd="desc", per_page=15) or {}
         return [(t["name"].replace(" ", "_"), f"{t['name']}  ({t['images']})") for t in res.get("tags", [])]
 
     def tags(self, pattern, cat, order, page):

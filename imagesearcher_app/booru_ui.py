@@ -1,5 +1,6 @@
 """The Boorus section: every configured booru site (any engine in boorus.py) searched together."""
 import html
+import time
 import webbrowser
 
 from PySide6.QtCore import Qt, QTimer
@@ -13,7 +14,7 @@ from PySide6.QtWidgets import (
 from . import boorus, bridge
 from .boorus import BooruSource, PixivMatchSource
 from .core import CAT_COLOR, CJK, PRESETS, SITE_FIELDS, fetch_all, log, rating_ok, run, save_conf
-from .widgets import Feed, Grid, Section, link, rich_label, unlink
+from .widgets import Feed, Grid, Section, link, middle_click, rich_label, unlink
 
 
 class BooruSection(Section):
@@ -37,6 +38,7 @@ class BooruSection(Section):
     # --- sites ---
     def reload_sites(self):
         self.engines = boorus.engines(self.conf)
+        self.complete_down = {}  # site id -> skip its autocomplete until (time.monotonic())
         while self.sitebar.count():
             self.sitebar.takeAt(0).widget().setParent(None)  # gone now, not at the next event loop turn
         for e in self.engines:
@@ -96,8 +98,30 @@ class BooruSection(Section):
 
     # --- search box / image tabs ---
     def complete(self, word):
-        e = self.first("complete")
-        return e.complete(word) if e else []
+        """Ticked sites in turn; one that fails (down, slow) is skipped for 5 minutes instead of costing every keystroke."""
+        now = time.monotonic()
+        for e in [e for e in self.ticked() + self.engines if e.has("complete")]:
+            if self.complete_down.get(e.id, 0) > now:
+                continue
+            try:
+                return e.complete(word)
+            except (RuntimeError, OSError) as err:
+                log.warning("autocomplete: %s skipped for 5 minutes: %s", e.name, err)
+                self.complete_down[e.id] = now + 300
+        return []
+
+    # --- ★: the site's own favourites ---
+    SITE_FAV = "site favourites"
+
+    def engine_of(self, p):
+        e = next((e for e in self.engines if e.id == p["site"]), None)
+        return e if e and e.has("favorite") else None
+
+    def site_fav_state(self, p):
+        return super().site_fav_state(p) if self.engine_of(p) else None
+
+    def site_fav_write(self, p, on):
+        self.engine_of(p).favorite(p["id"], on)
 
     def post_actions(self, v):
         p, out = v.p, []
@@ -378,6 +402,7 @@ class TagsTab(QWidget):
         self.list.setColumnWidth(0, 300)
         self.list.currentItemChanged.connect(lambda it, _: self.detail(it))
         self.list.itemActivated.connect(lambda it, _: self.open(it))
+        middle_click(self.list)
         sb = self.list.verticalScrollBar()
         sb.valueChanged.connect(lambda v: v >= sb.maximum() - 50 and self.more())
 

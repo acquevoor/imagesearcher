@@ -48,13 +48,14 @@ PRESETS = [
     {"id": "derpibooru", "name": "Derpibooru", "short": "DP", "engine": "philomena", "url": "https://derpibooru.org"},
     {"id": "aibooru", "name": "AIBooru", "short": "AIB", "engine": "danbooru", "url": "https://aibooru.online"},
 ]
-SITE_FIELDS = {"id": "", "name": "", "short": "", "engine": "", "url": "", "api_url": "", "login": "", "key": "", "filter_id": "", "on": False}
+SITE_FIELDS = {"id": "", "name": "", "short": "", "engine": "", "url": "", "api_url": "", "login": "", "key": "", "filter_id": "", "on": False,
+               "cookie": ""}  # cookie: the site's login cookies, for site favourites where the API key can't (Gelbooru family)
 
 CONF_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "imagesearcher" / "config.json"
 DEFAULTS = {
     "version": 2,
     "boorus": [{**SITE_FIELDS, **PRESETS[0], "on": True}],
-    "pixiv": {"refresh_token": "", "user_id": "", "premium": False, "follow_seen": 0},
+    "pixiv": {"refresh_token": "", "user_id": "", "premium": False, "follow_seen": 0, "rec_r18": "Show"},
     "blacklist": [], "favorites": [], "saved": [], "px_saved": [], "limit": 40,
     "download_dir": str(Path.home() / "Pictures" / "imagesearcher"), "history": False, "section": "boorus",
     "keys_prompt": True,  # offer the key fetcher on launch while Gelbooru / Rule34 / Pixiv keys are missing
@@ -72,6 +73,7 @@ DEFAULTS = {
     "paw": {"host": "pawchive.pw", "node": 2, "session": "", "bulk": {}},
     "paw_saved": [],
     "rd_saved": [],
+    "site_favs": [],  # "site:id" of posts you added to the site's own favourites from here (booru APIs don't say)
 }
 CONF_LOCK = threading.RLock()  # workers add to pixiv_map / refresh the Pixiv token while the UI saves
 
@@ -181,16 +183,16 @@ def net_level(url):
 HOST_HEADERS = {}
 
 
-def open_url(url, data=None, headers=None, timeout=30):
+def open_url(url, data=None, headers=None, timeout=30, method=None):
     """Every request goes through here and is logged: method, URL (secrets masked), status and time.
     Bodies of POSTs are never logged (they carry tokens)."""
     host = urllib.parse.urlsplit(url).hostname or ""
     h = {"User-Agent": UA, **HOST_HEADERS.get(host, {}), **(headers or {})}
     if referer(url):
         h["Referer"] = referer(url)
-    method, t0, lvl = "POST" if data else "GET", time.monotonic(), net_level(url)
+    method, t0, lvl = method or ("POST" if data is not None else "GET"), time.monotonic(), net_level(url)
     try:
-        r = urllib.request.urlopen(urllib.request.Request(url, data=data, headers=h), timeout=timeout)
+        r = urllib.request.urlopen(urllib.request.Request(url, data=data, headers=h, method=method), timeout=timeout)
     except urllib.error.HTTPError as e:
         log.warning("%s %s -> HTTP %s %s (%d ms)", method, redact(url), e.code, e.reason, (time.monotonic() - t0) * 1000)
         if e.code in (403, 503) and e.headers.get("cf-mitigated") == "challenge":

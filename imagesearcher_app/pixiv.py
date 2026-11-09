@@ -192,8 +192,8 @@ def ranking(conf, mode, date=""):
     return PixivSource(conf, "v1/illust/ranking", mode=mode, date=date or None, filter="for_android")
 
 
-def recommended(conf):
-    return PixivSource(conf, "v1/illust/recommended", filter="for_android", include_ranking_illusts="false")
+def recommended(conf, r18="Show"):
+    return PixivSource(conf, "v1/illust/recommended", keep_filter(r18), filter="for_android", include_ranking_illusts="false")
 
 
 def following(conf, restrict="public"):

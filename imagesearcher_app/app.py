@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from . import core, imageboard, look, pawchive, pixiv, x
+from . import core, imageboard, look, pawchive, pixiv, widgets, x
 from .booru_ui import BooruSection
 from .keys import KeysDialog, missing
 from .core import (
@@ -279,6 +279,8 @@ class Main(QMainWindow):
         self.show_section({"pixiv": self.pixiv, "x": self.x, "ib": self.ib, "paw": self.paw, "rd": self.reader}.get(self.conf["section"]) or self.boorus)
 
     def show_section(self, sec):
+        if widgets.BACKGROUND:  # a middle-click: the tab opens where it belongs, you stay where you are
+            return
         if self.stack.currentWidget() is not sec:
             log.info("section -> %s", self.switch.button(self.stack.indexOf(sec)).text())
         self.stack.setCurrentWidget(sec)
@@ -305,6 +307,10 @@ class Main(QMainWindow):
         HISTORY_DIR.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(HISTORY_DIR)))
 
+    def owner(self, p):
+        """The section a post belongs to (a booru feed can hold Pixiv posts): its site favourites, its favourites tab."""
+        return {"pixiv": self.pixiv, "x": self.x, "ib": self.ib, "paw": self.paw}.get(p["site"]) or self.boorus
+
     def is_fav(self, p):
         return any(same(f, p) for f in self.conf["favorites"])
 
@@ -320,6 +326,8 @@ class Main(QMainWindow):
         sec = {"pixiv": self.pixiv, "x": self.x, "ib": self.ib, "paw": self.paw}.get(p["site"], self.boorus)
         if sec:  # open image tabs keep their own post
             sec.refresh_favs()
+        for g in self.findChildren(widgets.Grid):  # ♥ on every grid showing it
+            g.viewport().update()
         root, fav = self.conf["download_dir"], self.is_fav(p)
         run(lambda: move_favorite(root, p, fav), lambda r, e: e and self.statusBar().showMessage(f"favorites folder: {e}"), "fav")
 

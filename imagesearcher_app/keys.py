@@ -1,6 +1,7 @@
 """Key fetcher: logs in to Gelbooru / Rule34 / Pixiv in a small built-in browser window and saves what the app needs
 (API key + user id, or the Pixiv refresh token). Offered on launch while any is missing, unless switched off, and
-always from ⚙ → Fetch keys…  The login is typed into the site's own page; the window keeps no cookies afterwards."""
+always from ⚙ → Fetch keys…  The login is typed into the site's own page; the window keeps no cookies afterwards,
+except Gelbooru's / Rule34's login cookies, which go in your private config: their API key can't add site favourites."""
 import re
 import webbrowser
 
@@ -12,6 +13,7 @@ from .core import log, preset, run, save_conf
 
 TARGETS = {"gelbooru": "Gelbooru", "rule34": "Rule34", "pixiv": "Pixiv"}
 KEY, UID = re.compile(r"api_key=([0-9a-fA-F]{20,})"), re.compile(r"user_id=(\d+)")
+LOGIN_COOKIES = ("user_id", "pass_hash")  # Gelbooru 0.2's login: enough for public/addfav.php
 
 
 def site(conf, sid):
@@ -51,7 +53,9 @@ def store(conf, sid, value):
         if s is None:
             s = {**preset(sid), "on": True}
             conf["boorus"].append(s)
-        s["login"], s["key"] = value
+        s["login"], s["key"] = value[:2]
+        if len(value) > 2 and value[2]:  # the built-in window's login cookies (the paste route has none)
+            s["cookie"] = value[2]
     save_conf(conf)
 
 
@@ -78,6 +82,8 @@ class LoginView(QDialog):
         self.resize(1000, 760)
         self.status = QLabel(wordWrap=True)
         self.profile = Profile(self)  # no storage name = off the record: nothing reaches the disk
+        self.cookies = {}
+        self.profile.cookieStore().cookieAdded.connect(self.cookie)
         # Pixiv's login bot check rejects the "QtWebEngine/x" marker with a bare サーバーでエラーが発生しました
         # (server error); without it the UA is the plain Chrome string of the Chromium we actually run.
         self.profile.setHttpUserAgent(re.sub(r" QtWebEngine/\S+", "", self.profile.httpUserAgent()))
@@ -112,6 +118,11 @@ class LoginView(QDialog):
             self.status.setText(f"Log in to {TARGETS[sid]} (solve the CAPTCHA if one shows). The API key is read from your account page by itself.")
         self.view.load(QUrl(url))
 
+    def cookie(self, c):
+        name = bytes(c.name()).decode(errors="replace")
+        if name in LOGIN_COOKIES and preset(self.sid)["url"].split("//")[1] in c.domain():
+            self.cookies[name] = bytes(c.value()).decode(errors="replace")
+
     # --- booru: find the credentials line ---
     def loaded(self, ok):
         if self.sid != "pixiv" and not self.finished_:
@@ -138,7 +149,9 @@ class LoginView(QDialog):
         log.info("keys: %s key check %s", TARGETS[self.sid], f"failed: {err}" if err else "passed")
         if err:
             return self.status.setText(f"{TARGETS[self.sid]} refused the key it showed: {err}")
-        self.finish(creds)
+        have = all(self.cookies.get(n) for n in LOGIN_COOKIES)
+        log.info("keys: %s login cookies %s", TARGETS[self.sid], "saved for site favourites" if have else "not seen: site favourites won't work")
+        self.finish((*creds, "; ".join(f"{n}={self.cookies[n]}" for n in LOGIN_COOKIES) if have else ""))
 
     # --- pixiv: trade the code ---
     def exchange(self, url):
@@ -197,7 +210,8 @@ class KeysDialog(QDialog):
     def refresh(self):
         gone = missing(self.conf)
         for sid, (state, btn) in self.rows.items():
-            state.setText("missing" if sid in gone else "✓ set")
+            fav = sid != "pixiv" and sid not in gone and not site(self.conf, sid).get("cookie")
+            state.setText("missing" if sid in gone else "✓ set, but Fetch again to use site favourites" if fav else "✓ set")
             btn.setText("Fetch…" if sid in gone else "Fetch again…")
 
     def fetch(self, sid):

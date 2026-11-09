@@ -223,6 +223,7 @@ def selftest():
     looktest()
     imgtest()
     updatetest()
+    favtest()
     print("selftest ok")
 
 
@@ -847,6 +848,105 @@ def imgtest():
         img = QImage(9000, 8000, QImage.Format_RGB32)  # needs 274 MB, over Qt's default limit
         img.fill(0x3366cc)
         assert img.save(str(good), "PNG", 100) and not widgets.decode_original(good).isNull()
+
+
+def favtest():
+    """★ site favourites: each engine's request, the 'already there' and 'login expired' answers; the remembered list;
+    Pixiv Recommended's maturity filter; autocomplete skipping a site that's down."""
+    from types import SimpleNamespace as NS
+    from . import booru_ui, widgets
+    sent = []
+
+    class Reply(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake(body=b"", code=None):
+        def open_url(url, data=None, headers=None, timeout=30, method=None):
+            sent.append((method or ("POST" if data is not None else "GET"), url, headers or {}))
+            if code:
+                raise urllib.error.HTTPError(url, code, "x", {}, io.BytesIO(b'{"message": "You have already favorited this post"}'))
+            return Reply(body)
+        return open_url
+    orig = core.open_url
+    try:
+        db, e9, kc = eng("danbooru", login="me", key="k"), eng("e621", login="me", key="k"), eng("konachan", login="me", key="h")
+        for e in (db, e9):
+            core.open_url = fake(b"{}")
+            e.favorite("5", True)
+            e.favorite("5", False)
+            (m1, u1, _), (m2, u2, _) = sent[-2:]
+            assert m1 == "POST" and "/favorites.json?post_id=5" in u1 and "api_key=k" in u1, u1
+            assert m2 == "DELETE" and "/favorites/5.json" in u2, u2
+            core.open_url = fake(code=422)  # already a favourite: fine when adding
+            e.favorite("5", True)
+            try:
+                e.favorite("5", False)
+                raise AssertionError("a refused removal must raise")
+            except RuntimeError:
+                pass
+        core.open_url = fake(b"{}")
+        kc.favorite("5", True)
+        assert sent[-1][0] == "POST" and "post/vote.json" in sent[-1][1] and "score=3" in sent[-1][1] and "password_hash=h" in sent[-1][1]
+        r34 = eng("rule34", login="1", key="k")
+        try:
+            r34.favorite("5", True)
+            raise AssertionError("no login cookie must say so")
+        except RuntimeError as e:
+            assert "log in" in str(e)
+        r34.site["cookie"] = "user_id=1; pass_hash=abc"
+        core.open_url = fake(b"3")
+        r34.favorite("5", True)
+        m, u, h = sent[-1]
+        assert u.startswith("https://rule34.xxx/public/addfav.php?id=5") and h["Cookie"] == "user_id=1; pass_hash=abc", u
+        assert "abc" not in core.redact(u)
+        core.open_url = fake(b"2")
+        try:
+            r34.favorite("5", True)
+            raise AssertionError("addfav.php's 2 = logged out")
+        except RuntimeError as e:
+            assert "expired" in str(e)
+        core.open_url = fake(b"")
+        r34.favorite("5", False)
+        assert "page=favorites&s=delete&id=5" in sent[-1][1]
+        assert not eng("derpibooru").has("favorite")
+    finally:
+        core.open_url = orig
+
+    # the list of what you favourited from here (booru APIs don't say)
+    saved, widgets.save_conf = widgets.save_conf, lambda conf: None
+    try:
+        sec = NS(conf={"site_favs": []}, SITE_FAV="site favourites")
+        p = {"site": "danbooru", "id": "5"}
+        assert widgets.Section.site_fav_state(sec, p) is False
+        widgets.Section.site_fav_marked(sec, p, True)
+        widgets.Section.site_fav_marked(sec, p, True)
+        assert sec.conf["site_favs"] == ["danbooru:5"] and widgets.Section.site_fav_state(sec, p) is True
+        widgets.Section.site_fav_marked(sec, p, False)
+        assert sec.conf["site_favs"] == [] and widgets.Section.site_fav_state(NS(conf=sec.conf, SITE_FAV=""), p) is None
+    finally:
+        widgets.save_conf = saved
+
+    keep = pixiv.recommended({"pixiv": {}}, "Hide").keep
+    assert keep({"rating": "g"}) and not keep({"rating": "e"})
+    assert pixiv.recommended({"pixiv": {}}, "Only").keep({"rating": "e"}) and pixiv.recommended({"pixiv": {}}).keep is None
+
+    calls = []
+
+    def engine(name, res):
+        def complete(word):
+            calls.append(name)
+            if res is None:
+                raise RuntimeError(f"{name}: HTTP 503")
+            return res
+        return NS(id=name, name=name, has=lambda f: True, complete=complete)
+    down, up = engine("down", None), engine("up", [("a", "a")])
+    sec = NS(ticked=lambda: [down, up], engines=[down, up], complete_down={})
+    assert booru_ui.BooruSection.complete(sec, "ab") == [("a", "a")] and calls == ["down", "up"]
+    assert booru_ui.BooruSection.complete(sec, "abc") == [("a", "a")] and calls == ["down", "up", "up"], "a down site is skipped"
 
 
 def updatetest():

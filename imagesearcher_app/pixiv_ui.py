@@ -58,7 +58,7 @@ class PixivSection(Section):
 
         self.add_fixed(Rankings(self), "Rankings")
         self.add_fixed(Trending(self), "Trending")
-        self.add_fixed(ListFeed(self, "Recommended", lambda: pixiv.recommended(self.conf)), "Recommended")
+        self.add_fixed(Recommended(self), "Recommended")
         self.following = Following(self)
         self.add_fixed(self.following, "Following")
         self.add_fixed(Bookmarks(self), "Bookmarks")
@@ -120,7 +120,7 @@ class PixivSection(Section):
         p = v.p
         if p["site"] != "pixiv":
             return []
-        out = [("★ Unbookmark" if p.get("bookmarked") else "☆ Bookmark on Pixiv", lambda: self.bookmark(v))]
+        out = []  # bookmarking: the ★ button / B
         if p.get("user"):
             out.append((f"👤 {p.get('user_name') or p['user']}", lambda: self.open_user(p["user"])))
         if p.get("series"):
@@ -134,17 +134,17 @@ class PixivSection(Section):
                 ("Exclude from query", lambda: self.search(f"{q} -{tag}".strip())),
                 ("Open on boorus", lambda: (self.main.show_section(self.main.boorus), self.main.boorus.open_tag(tag)))]
 
-    def bookmark(self, v):
-        p, conf = v.p, self.conf
-        on = not p.get("bookmarked")
+    # --- ★ = a Pixiv bookmark; Pixiv says which works you bookmarked, so no list of our own ---
+    SITE_FAV = "Pixiv bookmarks"
 
-        def done(r, e):
-            if e:
-                return self.main.statusBar().showMessage(f"bookmark failed: {e}")
-            log.info("pixiv %s #%s", "bookmark" if on else "unbookmark", p["id"])
-            self.main.statusBar().showMessage(f"{'Bookmarked' if on else 'Removed bookmark of'} #{p['id']} on Pixiv")
-            v.set_post({**p, "bookmarked": on, "bookmarks": p.get("bookmarks", 0) + (1 if on else -1)})
-        run(lambda: pixiv.bookmark(conf, p["id"], on), done)
+    def site_fav_state(self, p):
+        return bool(p.get("bookmarked")) if p["site"] == "pixiv" and self.conf["pixiv"]["refresh_token"] else None
+
+    def site_fav_write(self, p, on):
+        pixiv.bookmark(self.conf, p["id"], on)
+
+    def site_fav_marked(self, p, on):
+        return {**p, "bookmarked": on, "bookmarks": max(0, p.get("bookmarks", 0) + (1 if on else -1))}
 
     def refresh_favs(self):
         favs = [p for p in self.conf["favorites"] if p["site"] == "pixiv"]
@@ -153,14 +153,30 @@ class PixivSection(Section):
         self.tabs.setTabText(self.tabs.indexOf(self.favs.imgtabs), f"Favorites ({len(favs)})")
 
 
-class ListFeed(Lazy):
-    def __init__(self, section, label, make):
-        super().__init__(section, label)
-        self.make = make
+class Recommended(Lazy):
+    """Pixiv's picks for you, with a maturity filter (R-18 works only come if your Pixiv account shows them)."""
+
+    def __init__(self, section):
+        super().__init__(section, "Recommended")
+        self.r18 = QComboBox(toolTip="Pixiv rarely recommends R-18 works, and only to accounts set to show them: R-18 only may stay empty")
+        self.r18.addItems(["All", "SFW only", "R-18 only"])
+        self.r18.setCurrentIndex(["Show", "Hide", "Only"].index(section.conf["pixiv"]["rec_r18"]))
+        self.r18.currentIndexChanged.connect(self.changed)
+        row = QHBoxLayout()
+        for w in (QLabel("maturity:"), self.r18, QPushButton("⟳ Refresh", clicked=self.reload)):
+            row.addWidget(w)
+        row.addStretch()
+        self.lay.insertLayout(0, row)
+
+    def changed(self, i):
+        self.section.conf["pixiv"]["rec_r18"] = ["Show", "Hide", "Only"][i]
+        save_conf(self.section.conf)
+        log.info("pixiv recommended: maturity %s", self.r18.currentText())
+        self.reload()
 
     def reload(self):
         if self.section.ready(self):
-            self.start([self.make()])
+            self.start([pixiv.recommended(self.section.conf, self.section.conf["pixiv"]["rec_r18"])])
 
 
 class Rankings(Lazy):

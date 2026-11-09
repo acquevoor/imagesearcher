@@ -6,17 +6,18 @@ import urllib.parse
 import webbrowser
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QIcon, QImage, QImageReader, QKeySequence, QPixmap, QShortcut, QStandardItem, QStandardItemModel
+from PySide6.QtCore import QEvent, QModelIndex, QObject, QRect, QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QImageReader, QKeySequence, QPixmap, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QCompleter, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
-    QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QTabBar, QTabWidget, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QStyle, QStyledItemDelegate, QTabBar, QTabWidget, QTextBrowser,
+    QTreeWidget, QVBoxLayout, QWidget,
 )
 
 from . import pixiv
 from .look import host_env
 from .core import (
-    CAT_COLOR, LABELS, NAMES, THUMB, allowed, cached, fetch_all, fetch_file, fold, http, interleave, local, log,
+    CAT_COLOR, CJK, LABELS, NAMES, THUMB, allowed, cached, fetch_all, fetch_file, fold, http, interleave, local, log,
     referer, run, same, save_conf, to_ui, undecodable,
 )
 
@@ -69,6 +70,70 @@ def no_close(tabs, i):
 
 THUMBS = {}  # ponytail: unbounded in-memory cache, fine for a browsing session; LRU if RAM ever matters
 
+# True while a middle-click runs an item's double-click action: tabs it opens stay in the background
+BACKGROUND = False
+
+
+def in_background(fn, *args):
+    global BACKGROUND
+    BACKGROUND = True
+    try:
+        fn(*args)
+    finally:
+        BACKGROUND = False
+
+
+class MiddleClick(QObject):
+    """Middle-click on a list / tree item or a text link = its double-click / click action, in a background tab."""
+
+    def __init__(self, view):
+        super().__init__(view)
+        self.view = view
+        view.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, e):
+        if e.type() != QEvent.MouseButtonRelease or e.button() != Qt.MiddleButton:
+            return False
+        v, pos = self.view, e.position().toPoint()
+        if isinstance(v, QTextBrowser):
+            href = v.anchorAt(pos)
+            if href:
+                in_background(v.anchorClicked.emit, QUrl(href))
+            return bool(href)
+        it = v.itemAt(pos)
+        if it:
+            in_background(v.itemActivated.emit, *((it, 0) if isinstance(v, QTreeWidget) else (it,)))
+        return bool(it)
+
+
+def middle_click(view):
+    MiddleClick(view)
+    return view
+
+
+class Marks(QStyledItemDelegate):
+    """A thumbnail's ♥ (ImageSearcher favourite) and ★ (the site's own favourite / Pixiv bookmark), clickable: filled
+    when on, outlined on hover. No ★ where the site has no account favourites."""
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        grid, p = self.parent(), index.data(Qt.UserRole)
+        hover = bool(option.state & QStyle.State_MouseOver)
+        if not p:
+            return
+        painter.save()
+        f = QFont(painter.font())
+        f.setPixelSize(15)
+        painter.setFont(f)
+        for rect, kind, on in grid.marks(option.rect, p):
+            if on or hover:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(0, 0, 0, 150))
+                painter.drawRoundedRect(rect, 5, 5)
+                painter.setPen(QColor({"fav": "#ff5a7a", "site": "#ffc83d"}[kind] if on else "#e0e0e0"))
+                painter.drawText(rect, Qt.AlignCenter, {("fav", True): "♥", ("fav", False): "♡", ("site", True): "★", ("site", False): "☆"}[kind, on])
+        painter.restore()
+
 
 class Grid(QListWidget):
     def __init__(self, on_open):
@@ -83,12 +148,68 @@ class Grid(QListWidget):
         self.blank = QPixmap(THUMB, THUMB)
         self.blank.fill(Qt.transparent)
         self.itemActivated.connect(lambda it: on_open(self, self.row(it)))
+        self.setItemDelegate(Marks(self))
+        self.setMouseTracking(True)  # hover outlines of ♥ / ★
+        self.viewport().setAttribute(Qt.WA_Hover)
 
     def mouseReleaseEvent(self, e):
         it = self.itemAt(e.position().toPoint()) if e.button() == Qt.MiddleButton else None
         if it:
-            self.on_open(self, self.row(it), True)
+            in_background(self.on_open, self, self.row(it), True)
         super().mouseReleaseEvent(e)
+
+    # --- ♥ / ★ on the thumbnails: click them, or F / B on the selected one ---
+    def main_window(self):
+        """The main window, once this grid sits in it (None for a loose grid, as in the self-test)."""
+        w = self.window()
+        return w if hasattr(w, "owner") and w is not self else None
+
+    def marks(self, rect, p):
+        """[(QRect, "fav" | "site", on)] in the tile's top-right corner."""
+        main = self.main_window()
+        if not main:
+            return []
+        site = main.owner(p).site_fav_state(p)
+        r = QRect(rect.right() - 25, rect.top() + 3, 22, 22)
+        return [(r, "fav", main.is_fav(p))] + ([] if site is None else [(r.translated(-25, 0), "site", site)])
+
+    def mark_at(self, pos):
+        it = self.itemAt(pos)
+        if it and it.data(Qt.UserRole):
+            for rect, kind, _ in self.marks(self.visualItemRect(it), it.data(Qt.UserRole)):
+                if rect.contains(pos):
+                    return it, kind
+        return None, None
+
+    def mousePressEvent(self, e):
+        it, kind = self.mark_at(e.position().toPoint()) if e.button() == Qt.LeftButton else (None, None)
+        if it:
+            return self.toggle(it, kind)  # not a selection, and not half of a double-click that opens the image
+        super().mousePressEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        if not self.mark_at(e.position().toPoint())[0]:
+            super().mouseDoubleClickEvent(e)
+
+    def keyPressEvent(self, e):
+        it = self.currentItem()
+        kind = {Qt.Key_F: "fav", Qt.Key_B: "site"}.get(e.key()) if not e.modifiers() else None
+        if it and kind and self.main_window():
+            return self.toggle(it, kind)
+        super().keyPressEvent(e)
+
+    def toggle(self, it, kind):
+        main, p = self.main_window(), it.data(Qt.UserRole)
+        if kind == "fav":
+            main.toggle_fav(p)
+            return self.viewport().update()
+
+        def changed(new):
+            try:
+                it.setData(Qt.UserRole, new)
+            except RuntimeError:  # tile gone meanwhile (new search)
+                pass
+        main.owner(p).toggle_site_fav(p, changed)
 
     def restart(self):
         self.gen += 1
@@ -323,6 +444,7 @@ class Viewer(QWidget):
         self.info = QLabel(wordWrap=True, textInteractionFlags=Qt.TextSelectableByMouse)
         self.tags = QListWidget(focusPolicy=Qt.NoFocus, contextMenuPolicy=Qt.CustomContextMenu)
         self.tags.itemActivated.connect(lambda it: self.section.open_tag(it.text(), it.data(Qt.UserRole) or ""))
+        middle_click(self.tags)
         self.tags.customContextMenuRequested.connect(self.tag_menu)
         self.anim = QTimer(self, singleShot=True, timeout=self.next_frame)
 
@@ -332,6 +454,7 @@ class Viewer(QWidget):
             return b
         self.btn = btn
         self.fav = btn("♥ Favorite (F)", lambda: (self.main.toggle_fav(self.p), self.refresh_info()))
+        self.sfav = btn("☆ Site favourite (B)", self.toggle_site_fav)
         self.play = btn("▶ Play in mpv", self.play_video)
         self.strip_btn = btn("▤ Strip view", self.toggle_strip)
         self.pages, self.quality = QLabel(), QLabel(wordWrap=True)
@@ -342,7 +465,7 @@ class Viewer(QWidget):
         side = QVBoxLayout()
         side.addLayout(nav)
         for w in (self.pages, self.info, self.quality, QLabel("Tags (double-click = open tab, right-click = more)"), self.tags,
-                  btn("⬇ Download (D)", self.download), btn("📋 Copy image (C)", self.copy), self.fav, self.play, self.strip_btn):
+                  btn("⬇ Download (D)", self.download), btn("📋 Copy image (C)", self.copy), self.fav, self.sfav, self.play, self.strip_btn):
             side.addWidget(w)
         side.addLayout(self.extra)
         side.addWidget(btn("Open page", lambda: webbrowser.open(self.p["page"])))
@@ -355,7 +478,8 @@ class Viewer(QWidget):
 
         for key, fn in ((Qt.Key_Left, lambda: self.step(-1)), (Qt.Key_Right, lambda: self.step(1)),
                         (Qt.Key_PageUp, lambda: self.flip(-1)), (Qt.Key_PageDown, lambda: self.flip(1)),
-                        (Qt.Key_D, self.download), (Qt.Key_C, self.copy), (Qt.Key_F, self.fav.click)):
+                        (Qt.Key_D, self.download), (Qt.Key_C, self.copy), (Qt.Key_F, self.fav.click),
+                        (Qt.Key_B, self.toggle_site_fav)):
             QShortcut(QKeySequence(key), self, fn).setContext(Qt.WidgetWithChildrenShortcut)  # only in the visible image tab
 
     def download(self):
@@ -367,6 +491,15 @@ class Viewer(QWidget):
             return self.main.statusBar().showMessage("Nothing to copy yet: the image is still loading")
         QApplication.clipboard().setPixmap(self.pix)
         self.main.statusBar().showMessage(f"Copied {self.pix.width()}x{self.pix.height()} image" + ("" if self.hd else " (the original isn't in yet)"))
+
+    def toggle_site_fav(self):
+        def changed(new):
+            it = self.grid.item(self.locate())
+            if it and same(it.data(Qt.UserRole), self.p):
+                it.setData(Qt.UserRole, new)
+            self.p = new
+            self.refresh_info()
+        self.main.owner(self.p).toggle_site_fav(self.p, changed)
 
     def locate(self):
         """This tab's row in its grid; rows move when the grid reloads, the tab keeps its post either way."""
@@ -511,6 +644,10 @@ class Viewer(QWidget):
         self.info.setText(f"{head}{by}<br>{p['w']}×{p['h']}  rating:{p['rating']}{stats}{' · AI' if p.get('ai') else ''}{alts}"
                           f"<br>{self.locate() + 1}/{self.grid.count()} (←/→, Esc = grid, Ctrl+W = close)")
         self.fav.setText(("♥ Unfavorite" if self.main.is_fav(p) else "♡ Favorite") + " (F)")
+        owner = self.main.owner(p)
+        site = owner.site_fav_state(p)
+        self.sfav.setVisible(site is not None)
+        self.sfav.setText(f"{'★ Remove from' if site else '☆ Add to'} {owner.SITE_FAV} (B)")
 
     def rescale(self):
         if self.pix:
@@ -578,8 +715,9 @@ class Section(QWidget):
         self.completer.setWidget(self.q)
         self.completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
         self.completer.activated[QModelIndex].connect(self.insert_completion)
-        self.timer = QTimer(self, singleShot=True, interval=250, timeout=self.autocomplete)
+        self.timer = QTimer(self, singleShot=True, interval=120, timeout=self.autocomplete)
         self.q.textEdited.connect(lambda: self.timer.start())
+        self.completions = {}  # word -> results: going back over a word is instant
         self.refresh_saved()
 
     # --- tabs ---
@@ -597,8 +735,9 @@ class Section(QWidget):
             w = self.dyn[key] = ImageTabs(self, make())
             w.key = key
             self.tabs.setTabToolTip(self.tabs.addTab(w, title[:40]), title)
-            log.info("open tab %s", key)
-        self.tabs.setCurrentWidget(w)
+            log.info("open tab %s%s", key, " (background)" if BACKGROUND else "")
+        if not BACKGROUND:
+            self.tabs.setCurrentWidget(w)
         return w.home
 
     def open_feed(self, key, title, srcs, note=""):
@@ -644,13 +783,14 @@ class Section(QWidget):
     # --- search box ---
     def autocomplete(self):
         word = self.q.text().split(" ")[-1].lstrip("-")
-        if len(word) < 2:
+        if len(word) < (1 if CJK.search(word) else 2):
             return
         text = self.q.text()
 
         def done(res, err):
             if err or self.q.text() != text:
                 return
+            self.completions[word] = res
             self.model.clear()
             for value, label in res:
                 it = QStandardItem(label)
@@ -658,6 +798,8 @@ class Section(QWidget):
                 self.model.appendRow(it)
             if res:
                 self.completer.complete()
+        if word in self.completions:
+            return done(self.completions[word], None)
         run(lambda: self.complete(word), done)
 
     def insert_completion(self, index):
@@ -679,6 +821,44 @@ class Section(QWidget):
         save_conf(self.conf)
         self.refresh_saved()
         self.star.setText("★" if q in s else "☆")
+
+    # --- the site's own favourites (★): a section that has them sets SITE_FAV and site_fav_write ---
+    SITE_FAV = ""  # what to call them on the button ("Danbooru favourites", "Pixiv bookmarks")
+
+    def site_fav_state(self, p):
+        """True / False, or None when p's site has no account favourites this app can set."""
+        return f"{p['site']}:{p['id']}" in self.conf["site_favs"] if self.SITE_FAV else None
+
+    def site_fav_write(self, p, on):
+        """Worker thread: add / remove p on the site; raises with a message on failure."""
+        raise NotImplementedError
+
+    def site_fav_marked(self, p, on):
+        """After a write: remember it -> the post to show from now on."""
+        key, favs = f"{p['site']}:{p['id']}", self.conf["site_favs"]
+        if on and key not in favs:
+            favs.append(key)
+        elif not on and key in favs:
+            favs.remove(key)
+        save_conf(self.conf)
+        return p
+
+    def toggle_site_fav(self, p, changed):
+        """★ pressed on p; changed(new post) runs once the site said yes."""
+        on = self.site_fav_state(p)
+        name = f"{NAMES.get(p['site'], p['site'])} #{p['id']}"
+        if on is None:
+            return self.main.statusBar().showMessage(f"{NAMES.get(p['site'], p['site'])} has no site favourites here")
+        on = not on
+
+        def done(_, err):
+            if err:
+                log.warning("site favourite %s %s failed: %s", "add" if on else "remove", name, err)
+                return self.main.statusBar().showMessage(f"★ {name}: {err}")
+            log.info("site favourite %s %s", "added" if on else "removed", name)
+            self.main.statusBar().showMessage(f"{'★ Added' if on else '☆ Removed'} {name} {'to' if on else 'from'} {self.SITE_FAV}")
+            changed(self.site_fav_marked(p, on))
+        run(lambda: self.site_fav_write(p, on), done)
 
     # --- what a section provides ---
     def complete(self, word):

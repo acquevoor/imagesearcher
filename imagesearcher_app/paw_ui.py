@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 
 from . import pawchive as pw
 from .core import log, run, save_conf
-from .widgets import Feed, Grid, LiveBulk, Section, rich_label
+from .widgets import Feed, Grid, LiveBulk, Section, middle_click, rich_label
 
 
 class PawSection(Section):
@@ -120,7 +120,6 @@ class PawSection(Section):
             return []
         out = [(f"👤 {pw.creator_name(self.conf, p['service'], p['user'])}", lambda: self.open_creator(p["service"], p["user"])),
                ("📄 Post details", lambda: self.details(p)),
-               ("♥ Favorite on Pawchive", lambda: self.account_fav(p, True)), ("♡ Unfavorite on Pawchive", lambda: self.account_fav(p, False)),
                ("🔍 Same file elsewhere", lambda: self.same_file(v)), ("⚑ Flag post…", lambda: self.flag(p)),
                ("Open on site", lambda: webbrowser.open(p["page"]))]
         if p.get("preview"):
@@ -142,10 +141,14 @@ class PawSection(Section):
     def details(self, p):
         self.open_tab(f"details:{p['id']}", f"📄 {p['title'] or p['post_id']}"[:40], lambda: PostDetails(self, p))
 
-    def account_fav(self, p, on):
-        conf = self.conf
-        run(lambda: pw.fav_post(conf, p, on),
-            lambda r, e: self.main.statusBar().showMessage(f"Pawchive: {e}" if e else f"Pawchive: post {'favorited' if on else 'unfavorited'}"))
+    # --- ★ = a favourite on your Pawchive account (pasted session) ---
+    SITE_FAV = "Pawchive favourites"
+
+    def site_fav_state(self, p):
+        return super().site_fav_state(p) if p["site"] == "paw" else None
+
+    def site_fav_write(self, p, on):
+        pw.fav_post(self.conf, p, on)
 
     def flag(self, p):
         conf = self.conf
@@ -283,6 +286,7 @@ class ListTab(QWidget):
         self.list.setHeaderLabels(columns)
         self.list.setColumnWidth(0, 320)
         self.list.itemActivated.connect(lambda it, _: self.open(it.data(0, Qt.UserRole)))
+        middle_click(self.list)
         self.status = QLabel()
         self.top = QHBoxLayout()
         self.top.addWidget(self.filter, 1)
@@ -387,6 +391,7 @@ class Account(Feed):
         self.artist_list.setHeaderLabels(["Artist", "Service", "Updated"])
         self.artist_list.setColumnWidth(0, 320)
         self.artist_list.itemActivated.connect(lambda it, _: section.open_creator(*it.data(0, Qt.UserRole)))
+        middle_click(self.artist_list)
         row = QHBoxLayout()
         for w in (QLabel("Pawchive account:"), self.kind, QPushButton("⟳ Refresh", clicked=self.reload)):
             row.addWidget(w)
@@ -512,6 +517,7 @@ class PostDetails(QWidget):
         self.section, self.p = section, p
         self.view = QTextBrowser(openLinks=False)
         self.view.anchorClicked.connect(self.link)
+        middle_click(self.view)
         lay = QVBoxLayout(self)
         lay.addWidget(self.view)
         self.view.setHtml(f"<h3>{html.escape(p['title'])}</h3>loading…")

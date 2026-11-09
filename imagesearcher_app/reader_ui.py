@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 
 from . import reader as rd
 from .core import log, run
-from .widgets import Section
+from .widgets import Section, middle_click
 
 START = ("<h2>Reader</h2><p>Type a tag or a character in the box above, in any form: <code>hakurei_reimu</code>, "
          "<code>Reimu Hakurei</code> or <code>初音ミク</code>. A tab opens with what the wikis have: the Pixiv encyclopedia's "
@@ -79,6 +79,7 @@ class ReadView(QWidget):
         self.status = QLabel("Looking…", wordWrap=True)
         self.view = Article()
         self.view.anchorClicked.connect(self.link)
+        middle_click(self.view)
         self.back, self.fwd = QPushButton("◀", enabled=False, clicked=lambda: self.go(-1)), QPushButton("▶", enabled=False, clicked=lambda: self.go(1))
         self.site = QPushButton("Open on site", enabled=False, clicked=lambda: webbrowser.open(self.current()["url"]))
         self.full = QPushButton("Full article", visible=False, toolTip="The whole encyclopedia page, in your browser",

@@ -45,7 +45,12 @@ Includes a desktop entry. Without Nix: `python imagesearcher.py` with PySide6 in
 - **Top row**: one tab per search, tag, artist, pool or Pixiv user, plus the section's fixed tabs. Searching the same thing again switches to its tab.
 - **Second row**: inside each top tab, its ▦ Grid plus one tab per image you open.
   - Double-click a thumb to open it, Ctrl+double-click or middle-click to open it in the background.
-  - In an image tab: ←/→ walk the grid, PgUp/PgDn flip pages, D download, C copy the image, F favorite, Esc back to the grid, Ctrl+W close, Ctrl+Tab cycle.
+  - Middle-click works the same on tags, tag lists, creator lists and links: the tab opens behind, you stay where you are.
+  - In an image tab: ←/→ walk the grid, PgUp/PgDn flip pages, D download, C copy the image, F favorite, B site favourite, Esc back to the grid, Ctrl+W close, Ctrl+Tab cycle.
+- **Two kinds of favourite**, on every thumb's top-right corner (hover to see them) and as keys on the selected thumb or open image:
+  - ♥ **F**: ImageSearcher's own favourite (the file goes in your favorites folder; works for every site).
+  - ★ **B**: the site's own favourite, on your account there: Pixiv bookmarks, Danbooru / e621 / Moebooru favourites (your login + API key), Gelbooru / Rule34 favourites (log in through ⚙ → Fetch keys…: their API key can't do it, so the app keeps their login cookie in your private config), Pawchive favourites (pasted session). Not on X (read-only) or Imageboard.
+  - Booru sites don't tell the app what you favourited on the website, so ★ shows filled only for what you favourited from here.
   - Multi-page works get **▤ Strip view**: all pages stacked to scroll through, for manga.
   - Opening an image downloads its original into `{download dir}/cache/` and shows it from there. The next image is fetched ahead, so → is instant. **`cache/` is deleted when the app closes.**
   - ♥ moves the post's originals into `{download dir}/favorites/`, next to `cache/`, and downloads any pages you haven't opened. Un-♥ moves them back to `cache/`.
@@ -78,10 +83,10 @@ Includes a desktop entry. Without Nix: `python imagesearcher.py` with PySide6 in
   - AI works on/off
   - a minimum number of bookmarks
   - a date range
-- **Rankings** (daily … monthly, male / female, original, rookie, AI, manga, and the R-18 ones, for any past date), **Trending** tags, **Recommended**.
+- **Rankings** (daily … monthly, male / female, original, rookie, AI, manga, and the R-18 ones, for any past date), **Trending** tags, **Recommended** (with a maturity filter: All / SFW only / R-18 only. Pixiv rarely puts R-18 works in its recommendations, even for accounts that show them).
 - **Following**: new works from the artists you follow, with an unread count. **Bookmarks**: yours, public or private.
 - Image tabs:
-  - ☆ **Bookmark on Pixiv** / ★ Unbookmark
+  - ★ **Bookmark on Pixiv** (B), or the ★ on the thumb
   - 👤 the artist's tab (works / manga / bookmarks, + Follow / ✓ Following)
   - ▤ the work's series
   - **More like this**
@@ -139,7 +144,7 @@ Pawchive (pawchive.st, now **pawchive.pw**) is a Kemono-style archive of creator
 
 **⬇ Bulk creator** saves every post into `<download dir>/pawchive/<creator> (<service>)/<post> - <title>/`, under the original filenames. Choose "Images and videos" or "Everything", which also includes zip and psd attachments. It downloads 3 posts at a time, and images show in a live tab as they're saved. Use **Continue bulk** to resume where it stopped.
 
-**On an image:** 📄 **Post details** shows the full text, the other attachments, comments, revisions and the previous/next post. 🔍 **Same file elsewhere** looks the file up by its hash, ⚑ **Flag post** asks Pawchive to re-import it, and there are ♥ favorite buttons for your account.
+**On an image:** 📄 **Post details** shows the full text, the other attachments, comments, revisions and the previous/next post. 🔍 **Same file elsewhere** looks the file up by its hash, ⚑ **Flag post** asks Pawchive to re-import it. ★ / B adds it to your account's favourites.
 
 **🔍 Find by hash…** checks which posts hold the files you pick from your disk.
 
