@@ -652,8 +652,8 @@ class SiteDialog(QDialog):
         self.f = {}
         for key, label, tip in (("name", "Name", ""), ("short", "Tile label", "2–4 letters shown on thumbnails"),
                                 ("api_url", "API URL", "only if the API lives elsewhere (rule34: https://api.rule34.xxx)"),
-                                ("login", "Login / user id", "Gelbooru-family: your numeric user id"),
-                                ("key", "API key", "Moebooru: password hash; Philomena: your key"),
+                                ("login", "Login / user id", "Gelbooru-family: your numeric user id; Moebooru: your user name"),
+                                ("key", "API key", "Moebooru: your password (saved only as its hash); Philomena: your key"),
                                 ("filter_id", "Filter id", "Philomena only: the filter to search with (empty = site default)")):
             self.f[key] = QLineEdit(self.site[key], toolTip=tip, placeholderText=tip)
             if key == "key":
@@ -694,6 +694,8 @@ class SiteDialog(QDialog):
         if not url.startswith("http") or not name:
             return QMessageBox.warning(self, "Site", "Needs a name and an http(s) URL (Detect fills both).")
         fields = {k: e.text().strip() for k, e in self.f.items()}
+        if self.engine.currentData() == "moebooru":
+            fields["key"] = boorus.moebooru_hash(url, fields["key"])
         if not self.site.get("id"):  # new: unique id + label
             fresh = boorus.new_site({"boorus": [{"id": i} for i in self.taken]}, name, self.engine.currentData(), url, fields["api_url"])
             self.site = {**fresh, **{k: v for k, v in fields.items() if v}, "id": self.site.get("id") or fresh["id"]}

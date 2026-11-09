@@ -158,7 +158,7 @@ class Recommended(Lazy):
 
     def __init__(self, section):
         super().__init__(section, "Recommended")
-        self.r18 = QComboBox(toolTip="Pixiv rarely recommends R-18 works, and only to accounts set to show them: R-18 only may stay empty")
+        self.r18 = QComboBox(toolTip="Pixiv never puts R-18 in its recommendations, so R-18 only shows works related to your R-18 bookmarks")
         self.r18.addItems(["All", "SFW only", "R-18 only"])
         self.r18.setCurrentIndex(["Show", "Hide", "Only"].index(section.conf["pixiv"]["rec_r18"]))
         self.r18.currentIndexChanged.connect(self.changed)

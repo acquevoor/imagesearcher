@@ -83,7 +83,7 @@ Includes a desktop entry. Without Nix: `python imagesearcher.py` with PySide6 in
   - AI works on/off
   - a minimum number of bookmarks
   - a date range
-- **Rankings** (daily … monthly, male / female, original, rookie, AI, manga, and the R-18 ones, for any past date), **Trending** tags, **Recommended** (with a maturity filter: All / SFW only / R-18 only. Pixiv rarely puts R-18 works in its recommendations, even for accounts that show them).
+- **Rankings** (daily … monthly, male / female, original, rookie, AI, manga, and the R-18 ones, for any past date), **Trending** tags, **Recommended** (with a maturity filter: All / SFW only / R-18 only. Pixiv never puts R-18 works in its recommendations, so R-18 only shows works related to your R-18 bookmarks).
 - **Following**: new works from the artists you follow, with an unread count. **Bookmarks**: yours, public or private.
 - Image tabs:
   - ★ **Bookmark on Pixiv** (B), or the ★ on the thumb

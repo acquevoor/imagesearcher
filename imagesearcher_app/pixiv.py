@@ -193,7 +193,28 @@ def ranking(conf, mode, date=""):
 
 
 def recommended(conf, r18="Show"):
+    if r18 == "Only":  # Pixiv's recommended endpoint never sends R-18 (checked: 0 in ~280 works, any filter)
+        return R18Picks(conf)
     return PixivSource(conf, "v1/illust/recommended", keep_filter(r18), filter="for_android", include_ranking_illusts="false")
+
+
+class R18Picks(Source):
+    """Recommended, R-18 only: works related to your R-18 bookmarks (newest first), one bookmark per page.
+    ponytail: only the first page of public + private bookmarks seeds it; page further back if 30+ pages run dry."""
+    label = "PX"
+
+    def __init__(self, conf):
+        self.conf, self.seeds = conf, []
+
+    def fetch(self, page):
+        if page == 1:
+            self.seeds = [p["id"] for r in ("public", "private") for p in parse(api(self.conf, "v1/user/bookmarks/illust",
+                          user_id=my_id(self.conf), restrict=r)) if p["rating"] != "g"]
+        keep = keep_filter("Only")
+        for sid in self.seeds[page - 1:page + 4]:  # skip a seed whose related works are all SFW
+            if posts := [p for p in parse(api(self.conf, "v2/illust/related", illust_id=sid, filter="for_android")) if keep(p)]:
+                return posts
+        return []
 
 
 def following(conf, restrict="public"):

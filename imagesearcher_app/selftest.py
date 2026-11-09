@@ -932,7 +932,24 @@ def favtest():
 
     keep = pixiv.recommended({"pixiv": {}}, "Hide").keep
     assert keep({"rating": "g"}) and not keep({"rating": "e"})
-    assert pixiv.recommended({"pixiv": {}}, "Only").keep({"rating": "e"}) and pixiv.recommended({"pixiv": {}}).keep is None
+    assert pixiv.recommended({"pixiv": {}}).keep is None
+
+    def illust(i, r18):
+        return {"id": i, "x_restrict": r18, "meta_single_page": {"original_image_url": f"https://i/{i}.jpg"},
+                "image_urls": {"large": "l", "square_medium": "s"}}
+    feeds = {"v1/user/bookmarks/illust": [illust(1, 0), illust(2, 1)], "v2/illust/related": [illust(3, 1), illust(4, 0)]}
+    asked, orig = [], (pixiv.api, pixiv.my_id)
+    pixiv.api = lambda conf, path, **kw: asked.append((path, kw)) or {"illusts": feeds[path]}
+    pixiv.my_id = lambda conf: "9"
+    try:
+        posts = pixiv.recommended({"pixiv": {}}, "Only").fetch(1)
+    finally:
+        pixiv.api, pixiv.my_id = orig
+    assert [p["id"] for p in posts] == ["3"], posts
+    assert ("v2/illust/related", {"illust_id": "2", "filter": "for_android"}) in asked, "R-18 only seeds from R-18 bookmarks"
+
+    assert boorus.moebooru_hash("https://yande.re", "pw") == __import__("hashlib").sha1(b"choujin-steiner--pw--").hexdigest()
+    assert boorus.moebooru_hash("https://konachan.com", "a" * 40) == "a" * 40 and boorus.moebooru_hash("https://k", "") == ""
 
     calls = []
 

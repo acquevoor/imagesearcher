@@ -2,6 +2,7 @@
 
 Every engine has search(); the optional features (complete, tags, count, wiki, related, pools, artist,
 find_pixiv) are plain methods a subclass may define, and the UI only shows what has(feature) reports."""
+import hashlib
 import html
 import json
 import re
@@ -224,6 +225,14 @@ def parse_gel_tags(name, body):
     return data.get("tag", []) if isinstance(data, dict) else data
 
 
+def moebooru_hash(url, key):
+    """Moebooru logs in with SHA1("<site salt>--<password>--"); a 40-hex key is taken as that hash already."""
+    if not key or re.fullmatch(r"[0-9a-f]{40}", key):
+        return key
+    salt = "So-I-Heard-You-Like-Mupkids-?" if "konachan" in url else "choujin-steiner"  # the latter: Moebooru's default (yande.re)
+    return hashlib.sha1(f"{salt}--{key}--".encode()).hexdigest()
+
+
 class Moebooru(Engine):
     """konachan.com / .net, yande.re, sakugabooru."""
     CATS = {0: "general", 1: "artist", 3: "copyright", 4: "character", 5: "artist", 6: "meta"}  # 5 = circle
@@ -244,7 +253,13 @@ class Moebooru(Engine):
                          p.get("width", 0), p.get("height", 0), pixiv_id=px_id(p.get("source")), md5=p.get("md5", ""))
 
     def favorite(self, pid, on):  # score 3 = favourite, 0 = no vote
-        self.write("POST", "post/vote.json", id=pid, score=3 if on else 0)
+        try:
+            self.write("POST", "post/vote.json", id=pid, score=3 if on else 0)
+        except RuntimeError as e:  # reads ignore a wrong login, so this is where it shows
+            if "HTTP 403" not in str(e):
+                raise
+            raise RuntimeError(f"{self.name}: login refused. In ⚙ → Booru sites → Edit, Login is your user name "
+                               "(not the number) and API key your password (saved only as its hash)") from None
 
     def complete(self, word):
         return [(t["name"], f"{t['name']}  ({t['count']})") for t in self.get("tag.json", timeout=4, name=f"{word}*", order="count", limit=15) or []]
