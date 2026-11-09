@@ -866,6 +866,12 @@ def imgtest():
         assert reader.nextImageDelay() == delay, reader.nextImageDelay()
     assert not reader.canRead() and reader.loopCount() == -1
 
+    # hotkeys: every default parses, none clash, a changed one wins
+    from PySide6.QtGui import QKeySequence
+    keys = [QKeySequence(k) for _, k in core.HOTKEYS.values()]
+    assert all(not k.isEmpty() for k in keys) and len({k.toString() for k in keys}) == len(keys)
+    assert widgets.hotkey({"hotkeys": {"fav": "G"}}, "fav") == "G" and widgets.hotkey({"hotkeys": {}}, "zoom_in") == "+"
+
     # favourites search
     tags = ["blue_eyes", "1girl", "Hatsune_Miku"]
     assert widgets.fav_match(tags, "blue miku") and widgets.fav_match(tags, "") and widgets.fav_match(tags, "1girl -sketch -")

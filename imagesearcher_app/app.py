@@ -9,17 +9,17 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
+from PySide6.QtGui import QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog,
-    QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QKeySequenceEdit, QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import core, imageboard, look, pawchive, pixiv, widgets, x
 from .booru_ui import BooruSection
 from .keys import KeysDialog, missing
 from .core import (
-    HISTORY_DIR, NAMES, allowed, clear_cache, download_post, fetch_all, interleave, load_conf, log, move_favorite, run,
+    HISTORY_DIR, HOTKEYS, NAMES, allowed, clear_cache, download_post, fetch_all, interleave, load_conf, log, move_favorite, run,
     same, save_conf, set_history, to_ui,
 )
 from .pixiv_ui import PixivSection
@@ -79,6 +79,7 @@ class Settings(QDialog):
         form.addRow("Download dir", row)
         self.limit = QSpinBox(minimum=10, maximum=100, value=c["limit"])
         form.addRow("Booru posts per page", self.limit)
+        form.addRow("Keyboard", QPushButton("⌨ Hotkeys…", clicked=lambda: Hotkeys(main).exec()))
         form.addRow(QLabel("Gelbooru / Rule34 / Pixiv keys: Fetch keys…   Other sites' logins and keys: Boorus → Sites…", wordWrap=True))
         # X: opt-in, off by default
         xc = c["x"]
@@ -233,6 +234,50 @@ class Settings(QDialog):
                           boards={b.strip("/").lower(): h.lower() for b, h in pairs} or conf["ib"]["boards"])
 
 
+class Hotkeys(QDialog):
+    """Settings → Hotkeys…: one key per action; Save applies it at once, open tabs included."""
+
+    def __init__(self, main):
+        super().__init__(main)
+        self.main = main
+        self.setWindowTitle("Hotkeys")
+        self.resize(520, 640)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Click a box and press the new key. ✕ clears it back to the default. Hover a box to see its default.", wordWrap=True))
+        form, self.edits = QFormLayout(), {}
+        for action, (what, default) in HOTKEYS.items():
+            e = QKeySequenceEdit(QKeySequence(widgets.hotkey(main.conf, action)), maximumSequenceLength=1, clearButtonEnabled=True,
+                                 toolTip=f"default: {default}")
+            self.edits[action] = e
+            form.addRow(what, e)
+        body = QWidget()
+        body.setLayout(form)
+        lay.addWidget(QScrollArea(widget=body, widgetResizable=True), 1)
+        self.note = QLabel(wordWrap=True)
+        lay.addWidget(self.note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel | QDialogButtonBox.RestoreDefaults,
+                                   accepted=self.save, rejected=self.reject)
+        buttons.button(QDialogButtonBox.RestoreDefaults).clicked.connect(
+            lambda: [e.setKeySequence(QKeySequence(HOTKEYS[a][1])) for a, e in self.edits.items()])
+        lay.addWidget(buttons)
+
+    def save(self):
+        keys = {a: e.keySequence().toString() or HOTKEYS[a][1] for a, e in self.edits.items()}
+        seen = {}
+        for a, k in keys.items():
+            if k in seen:
+                return self.note.setText(f"<b>{k}</b> is on both “{HOTKEYS[seen[k]][0]}” and “{HOTKEYS[a][0]}”: give one of them another key.")
+            seen[k] = a
+        conf = self.main.conf
+        conf["hotkeys"] = {a: k for a, k in keys.items() if QKeySequence(k) != QKeySequence(HOTKEYS[a][1])}
+        save_conf(conf)
+        widgets.rebind(conf)
+        for v in self.main.findChildren(widgets.Viewer):
+            v.refresh_info()  # their buttons show the keys
+        log.info("hotkeys saved: %s", ", ".join(f"{a}={k}" for a, k in conf["hotkeys"].items()) or "all default")
+        self.accept()
+
+
 class Main(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -249,14 +294,14 @@ class Main(QMainWindow):
         self.reader = ReaderSection(self)
         self.x = XSection(self) if self.conf["x"]["enabled"] else None
         self.ib = IBSection(self) if self.conf["ib"]["enabled"] else None
-        secs = [(self.boorus, "Boorus", "Ctrl+1"), (self.pixiv, "Pixiv", "Ctrl+2"), (self.paw, "Pawchive", "Ctrl+5"), (self.reader, "Reader", "Ctrl+6")] \
-            + ([(self.x, "X", "Ctrl+3")] if self.x else []) + ([(self.ib, "Imageboard", "Ctrl+4")] if self.ib else [])
-        for i, (sec, name, key) in enumerate(secs):
-            b = QPushButton(f"{name}", checkable=True, toolTip=key, minimumWidth=110)
+        secs = [(self.boorus, "Boorus", "boorus"), (self.pixiv, "Pixiv", "pixiv"), (self.paw, "Pawchive", "paw"), (self.reader, "Reader", "reader")] \
+            + ([(self.x, "X", "x")] if self.x else []) + ([(self.ib, "Imageboard", "ib")] if self.ib else [])
+        for i, (sec, name, action) in enumerate(secs):
+            b = QPushButton(f"{name}", checkable=True, toolTip=widgets.key_text(self.conf, action), minimumWidth=110)
             self.switch.addButton(b, i)
             top.addWidget(b)
             self.stack.addWidget(sec)
-            QShortcut(QKeySequence(key), self, lambda s=sec: self.show_section(s))
+            widgets.bind(self, self.conf, action, lambda s=sec: self.show_section(s), Qt.WindowShortcut)
         self.switch.idClicked.connect(lambda i: self.show_section(self.stack.widget(i)))
         top.addStretch()
         self.history_cb = QCheckBox("History", checked=self.conf["history"],

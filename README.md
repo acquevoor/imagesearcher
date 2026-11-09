@@ -46,7 +46,9 @@ Includes a desktop entry. Without Nix: `python imagesearcher.py` with PySide6 in
 - **Second row**: inside each top tab, its ▦ Grid plus one tab per image you open.
   - Double-click a thumb to open it, Ctrl+double-click or middle-click to open it in the background.
   - Middle-click works the same on tags, tag lists, creator lists and links: the tab opens behind, you stay where you are.
-  - In an image tab: ←/→ walk the grid, PgUp/PgDn flip pages, D download, C copy the image (a Pixiv animation is copied as a GIF), R reload (retries what failed), F favorite, B site favourite, Esc back to the grid, Ctrl+W close, Ctrl+Tab cycle.
+  - In an image tab: ←/→ walk the grid, PgUp/PgDn flip pages, D download, C copy the image (a Pixiv animation is copied as a GIF), R reload (retries what failed), L copy the link, F favorite, B site favourite, Esc back to the grid, Ctrl+W close, Ctrl+Tab cycle.
+- **Copy link**: L on a selected thumbnail or in an image tab, the 🔗 button, or right-click a thumbnail → Copy link.
+- **Hotkeys** are configurable: ⚙ Settings → ⌨ Hotkeys… lists every shortcut; changes apply at once, open tabs included.
 - **Two kinds of favourite**, on every thumb's top-right corner (hover to see them) and as keys on the selected thumb or open image:
   - ♥ **F**: ImageSearcher's own favourite (the file goes in your favorites folder; works for every site).
   - ★ **B**: the site's own favourite, on your account there: Pixiv bookmarks, Danbooru / e621 / Moebooru favourites (your login + API key), Gelbooru / Rule34 favourites (log in through ⚙ → Fetch keys…: their API key can't do it, so the app keeps their login cookie in your private config), Pawchive favourites (pasted session). Not on X (read-only) or Imageboard.

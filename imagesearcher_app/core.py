@@ -74,6 +74,19 @@ DEFAULTS = {
     "paw_saved": [],
     "rd_saved": [],
     "site_favs": [],  # "site:id" of posts you added to the site's own favourites from here (booru APIs don't say)
+    "hotkeys": {},  # action -> key, only the ones changed in Settings → Hotkeys… (HOTKEYS has the defaults)
+}
+HOTKEYS = {  # action -> (what it does, default key)
+    "prev": ("Image: previous post", "Left"), "next": ("Image: next post", "Right"),
+    "page_prev": ("Image: previous page", "PgUp"), "page_next": ("Image: next page", "PgDown"),
+    "download": ("Image: download", "D"), "copy": ("Image: copy the image / the selected strip pages", "C"),
+    "copy_link": ("Image or thumbnail: copy the link", "L"), "reload": ("Image: reload", "R"),
+    "fav": ("Image or thumbnail: ♥ favourite", "F"), "site_fav": ("Image or thumbnail: ★ site favourite", "B"),
+    "zoom_out": ("Strip view: zoom out", "-"), "zoom_in": ("Strip view: zoom in (= works too)", "+"),
+    "to_grid": ("Image tabs: back to the grid", "Esc"), "close_tab": ("Image tabs: close the image", "Ctrl+W"),
+    "next_tab": ("Image tabs: next", "Ctrl+Tab"), "prev_tab": ("Image tabs: previous", "Ctrl+Shift+Tab"),
+    "boorus": ("Show Boorus", "Ctrl+1"), "pixiv": ("Show Pixiv", "Ctrl+2"), "x": ("Show X", "Ctrl+3"),
+    "ib": ("Show Imageboard", "Ctrl+4"), "paw": ("Show Pawchive", "Ctrl+5"), "reader": ("Show Reader", "Ctrl+6"),
 }
 CONF_LOCK = threading.RLock()  # workers add to pixiv_map / refresh the Pixiv token while the UI saves
 

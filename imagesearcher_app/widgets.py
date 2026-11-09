@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 from . import pixiv
 from .look import host_env
 from .core import (
-    CAT_COLOR, CJK, LABELS, NAMES, THUMB, allowed, cached, fetch_all, fetch_file, fold, http, interleave, local, log,
+    CAT_COLOR, CJK, HOTKEYS, LABELS, NAMES, THUMB, allowed, cached, fetch_all, fetch_file, fold, http, interleave, local, log,
     referer, run, same, save_conf, to_ui, undecodable,
 )
 
@@ -137,6 +137,45 @@ class Marks(QStyledItemDelegate):
         painter.restore()
 
 
+BOUND = set()  # (QShortcut, action): live shortcuts, re-keyed when Settings → Hotkeys… changes them
+
+
+def hotkey(conf, action):
+    return conf["hotkeys"].get(action) or HOTKEYS[action][1]
+
+
+def key_text(conf, action):
+    """The key as shown on buttons ("Ctrl+W")."""
+    return QKeySequence(hotkey(conf, action)).toString(QKeySequence.NativeText)
+
+
+def pressed(conf, e, action):
+    return QKeySequence(e.keyCombination()) == QKeySequence(hotkey(conf, action))
+
+
+def bind(parent, conf, action, fn, context=Qt.WidgetWithChildrenShortcut):
+    sc = QShortcut(QKeySequence(hotkey(conf, action)), parent, fn)
+    sc.setContext(context)
+    entry = (sc, action)
+    BOUND.add(entry)
+    sc.destroyed.connect(lambda *_: BOUND.discard(entry))
+    return sc
+
+
+def rebind(conf):
+    for sc, action in list(BOUND):
+        try:
+            sc.setKey(QKeySequence(hotkey(conf, action)))
+        except RuntimeError:  # gone with its tab
+            BOUND.discard((sc, action))
+
+
+def copy_link(main, p):
+    QApplication.clipboard().setText(p["page"])
+    main.statusBar().showMessage(f"Copied link: {p['page']}")
+    log.info("copy link %s #%s", p["site"], p["id"])
+
+
 class Grid(QListWidget):
     def __init__(self, on_open):
         super().__init__()
@@ -194,11 +233,23 @@ class Grid(QListWidget):
             super().mouseDoubleClickEvent(e)
 
     def keyPressEvent(self, e):
-        it = self.currentItem()
-        kind = {Qt.Key_F: "fav", Qt.Key_B: "site"}.get(e.key()) if not e.modifiers() else None
-        if it and kind and self.main_window():
-            return self.toggle(it, kind)
+        it, main = self.currentItem(), self.main_window()
+        if it and main:
+            if pressed(main.conf, e, "copy_link"):
+                return copy_link(main, it.data(Qt.UserRole))
+            kind = next((k for a, k in (("fav", "fav"), ("site_fav", "site")) if pressed(main.conf, e, a)), None)
+            if kind:
+                return self.toggle(it, kind)
         super().keyPressEvent(e)
+
+    def contextMenuEvent(self, e):
+        it, main = self.itemAt(e.pos()), self.main_window()
+        if not (it and main):
+            return
+        p, m = it.data(Qt.UserRole), QMenu(self)
+        m.addAction(f"🔗 Copy link\t{key_text(main.conf, 'copy_link')}", lambda: copy_link(main, p))
+        m.addAction("Open page in browser", lambda: webbrowser.open(p["page"]))
+        m.exec(e.globalPos())
 
     def toggle(self, it, kind):
         main, p = self.main_window(), it.data(Qt.UserRole)
@@ -434,10 +485,10 @@ class ImageTabs(QTabWidget):
         no_close(self, 0)
         self.tabCloseRequested.connect(self.close_image)
         self.currentChanged.connect(lambda i: self.widget(i) and self.widget(i).setFocus())
-        for key, fn in (("Ctrl+W", lambda: self.close_image(self.currentIndex())), ("Escape", lambda: self.setCurrentIndex(0)),
-                        ("Ctrl+Tab", lambda: self.setCurrentIndex((self.currentIndex() + 1) % self.count())),
-                        ("Ctrl+Shift+Tab", lambda: self.setCurrentIndex((self.currentIndex() - 1) % self.count()))):
-            QShortcut(QKeySequence(key), self, fn).setContext(Qt.WidgetWithChildrenShortcut)
+        for action, fn in (("close_tab", lambda: self.close_image(self.currentIndex())), ("to_grid", lambda: self.setCurrentIndex(0)),
+                           ("next_tab", lambda: self.setCurrentIndex((self.currentIndex() + 1) % self.count())),
+                           ("prev_tab", lambda: self.setCurrentIndex((self.currentIndex() - 1) % self.count()))):
+            bind(self, section.conf, action, fn)
 
     def open_image(self, grid, row, background=False):
         p = grid.item(row).data(Qt.UserRole)
@@ -618,8 +669,11 @@ class Viewer(QWidget):
             b.clicked.connect(fn)
             return b
         self.btn = btn
-        self.fav = btn("♥ Favorite (F)", lambda: (self.main.toggle_fav(self.p), self.refresh_info()))
-        self.sfav = btn("☆ Site favourite (B)", self.toggle_site_fav)
+        self.fav = btn("♥ Favorite", lambda: (self.main.toggle_fav(self.p), self.refresh_info()))
+        self.sfav = btn("☆ Site favourite", self.toggle_site_fav)
+        self.keyed = [(btn("⬇ Download", self.download), "⬇ Download", "download"), (btn("📋 Copy image", self.copy), "📋 Copy image", "copy"),
+                      (btn("🔗 Copy link", lambda: copy_link(self.main, self.p)), "🔗 Copy link", "copy_link"),
+                      (btn("⟳ Reload", self.reload), "⟳ Reload", "reload")]
         self.play = btn("▶ Play in mpv", self.play_video)
         self.strip_btn = btn("▤ Strip view", self.toggle_strip)
         self.pages, self.quality = QLabel(), QLabel(wordWrap=True)
@@ -630,8 +684,7 @@ class Viewer(QWidget):
         side = QVBoxLayout()
         side.addLayout(nav)
         for w in (self.pages, self.info, self.quality, QLabel("Tags (double-click = open tab, right-click = more)"), self.tags,
-                  btn("⬇ Download (D)", self.download), btn("📋 Copy image (C)", self.copy), self.fav, self.sfav, self.play, self.strip_btn,
-                  btn("⟳ Reload (R)", self.reload)):
+                  self.keyed[0][0], self.keyed[1][0], self.keyed[2][0], self.fav, self.sfav, self.play, self.strip_btn, self.keyed[3][0]):
             side.addWidget(w)
         side.addLayout(self.extra)
         side.addWidget(btn("Open page", lambda: webbrowser.open(self.p["page"])))
@@ -642,12 +695,14 @@ class Viewer(QWidget):
         lay.addWidget(self.stack, 1)
         lay.addWidget(sidew)
 
-        for key, fn in ((Qt.Key_Left, lambda: self.step(-1)), (Qt.Key_Right, lambda: self.step(1)),
-                        (Qt.Key_PageUp, lambda: self.flip(-1)), (Qt.Key_PageDown, lambda: self.flip(1)),
-                        (Qt.Key_D, self.download), (Qt.Key_C, self.copy), (Qt.Key_R, self.reload), (Qt.Key_F, self.fav.click),
-                        (Qt.Key_B, self.toggle_site_fav), (Qt.Key_Minus, lambda: self.zoom_strip(-1)),
-                        (Qt.Key_Plus, lambda: self.zoom_strip(1)), (Qt.Key_Equal, lambda: self.zoom_strip(1))):
-            QShortcut(QKeySequence(key), self, fn).setContext(Qt.WidgetWithChildrenShortcut)  # only in the visible image tab
+        conf = self.main.conf
+        for action, fn in (("prev", lambda: self.step(-1)), ("next", lambda: self.step(1)),
+                           ("page_prev", lambda: self.flip(-1)), ("page_next", lambda: self.flip(1)),
+                           ("download", self.download), ("copy", self.copy), ("copy_link", lambda: copy_link(self.main, self.p)),
+                           ("reload", self.reload), ("fav", self.fav.click), ("site_fav", self.toggle_site_fav),
+                           ("zoom_out", lambda: self.zoom_strip(-1)), ("zoom_in", lambda: self.zoom_strip(1))):
+            bind(self, conf, action, fn)  # only in the visible image tab
+        QShortcut(QKeySequence(Qt.Key_Equal), self, lambda: self.zoom_strip(1)).setContext(Qt.WidgetWithChildrenShortcut)  # + without Shift
 
     def reload(self):
         """Load this post again: what failed downloads again, what's in cache/ comes straight back."""
@@ -820,7 +875,9 @@ class Viewer(QWidget):
         self.stack.addWidget(Strip(self.main.conf["download_dir"], self.p, self.main.statusBar().showMessage))
         self.stack.setCurrentIndex(1)
         self.strip_btn.setText("◫ Single page")
-        self.quality.setText(f"strip view, {len(self.p['files'])} pages (Ctrl+wheel or −/+ to zoom out)")
+        c = self.main.conf
+        self.quality.setText(f"strip view, {len(self.p['files'])} pages (Ctrl+wheel or {key_text(c, 'zoom_out')} / {key_text(c, 'zoom_in')} to zoom; "
+                             f"click pages to copy them)")
 
     def prefetch(self, root):
         """Pull the next post's original into cache/ so → opens it straight from disk."""
@@ -840,19 +897,23 @@ class Viewer(QWidget):
         p = self.p
         n = len(p["files"])
         self.strip_btn.setText("◫ Single page" if self.strip_on else "▤ Strip view")
-        self.pages.setText(f"page {self.pg + 1}/{n} (PgUp/PgDn)" if n > 1 else "")
+        def k(action):
+            return key_text(self.main.conf, action)
+        self.pages.setText(f"page {self.pg + 1}/{n} ({k('page_prev')}/{k('page_next')})" if n > 1 else "")
         self.pages.setVisible(n > 1 and not self.strip_on)
         head = f"<b>{html.escape(p.get('title') or NAMES.get(p['site'], p['site']) + ' #' + p['id'])}</b>"
         by = f"<br>by {html.escape(p['user_name'])}" if p.get("user_name") else ""
         stats = f"  ♥{p['bookmarks']:,}" if "bookmarks" in p else ""
         alts = "".join(f"<br>also on {NAMES.get(a['site'], a['site'])} #{a['id']}" for a in p.get("alts", []))
         self.info.setText(f"{head}{by}<br>{p['w']}×{p['h']}  rating:{p['rating']}{stats}{' · AI' if p.get('ai') else ''}{alts}"
-                          f"<br>{self.locate() + 1}/{self.grid.count()} (←/→, Esc = grid, Ctrl+W = close)")
-        self.fav.setText(("♥ Unfavorite" if self.main.is_fav(p) else "♡ Favorite") + " (F)")
+                          f"<br>{self.locate() + 1}/{self.grid.count()} ({k('prev')}/{k('next')}, {k('to_grid')} = grid, {k('close_tab')} = close)")
+        self.fav.setText(("♥ Unfavorite" if self.main.is_fav(p) else "♡ Favorite") + f" ({k('fav')})")
+        for b, text, action in self.keyed:
+            b.setText(f"{text} ({k(action)})")
         owner = self.main.owner(p)
         site = owner.site_fav_state(p)
         self.sfav.setVisible(site is not None)
-        self.sfav.setText(f"{'★ Remove from' if site else '☆ Add to'} {owner.SITE_FAV} (B)")
+        self.sfav.setText(f"{'★ Remove from' if site else '☆ Add to'} {owner.SITE_FAV} ({k('site_fav')})")
 
     def rescale(self):
         if self.pix:
