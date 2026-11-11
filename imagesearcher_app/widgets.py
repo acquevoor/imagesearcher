@@ -922,7 +922,7 @@ class Viewer(QWidget):
                 self.fails += 1
                 if original:
                     self.quality.setText(f"original failed: {why_failed(err)} — showing the sample")
-                if not self.pix and self.fails == (2 if full and not have else 1):
+                if not self.pix and self.fails == (2 if full and not have and sample != full else 1):
                     spin(self.img)
                     self.img.setText(f"failed: {why_failed(err)}")
                     log.warning("image %s #%s didn't show: %s", self.p["site"], self.p["id"], why_failed(err))
@@ -931,8 +931,8 @@ class Viewer(QWidget):
             if original:
                 self.quality.setText(f"original {img.width()}×{img.height()}, in {folder if not have else have.parent.name}/")
             self.rescale()
-        if not have:
-            sample = p["thumb"] if p["video"] else p["samples"][pg]
+        sample = p["thumb"] if p["video"] else p["samples"][pg]
+        if not have and sample != full:  # comics list each page once, as both
             run(lambda: QImage.fromData(http(sample)), lambda i, e: done(i, e, False), "view")
         if full:
             # ponytail: Qt refuses to decode images over 256 MB (~8000×8000), the sample stays up then
@@ -993,7 +993,8 @@ class Viewer(QWidget):
         by = f"<br>by {html.escape(p['user_name'])}" if p.get("user_name") else ""
         stats = f"  ♥{p['bookmarks']:,}" if "bookmarks" in p else ""
         alts = "".join(f"<br>also on {NAMES.get(a['site'], a['site'])} #{a['id']}" for a in p.get("alts", []))
-        self.info.setText(f"{head}{by}<br>{p['w']}×{p['h']}  rating:{p['rating']}{stats}{' · AI' if p.get('ai') else ''}{alts}"
+        size = f"{p['w']}×{p['h']}  " if p["w"] else ""
+        self.info.setText(f"{head}{by}<br>{size}rating:{p['rating']}{stats}{' · AI' if p.get('ai') else ''}{alts}"
                           f"<br>{self.locate() + 1}/{self.grid.count()} ({k('prev')}/{k('next')}, {k('to_grid')} = grid, {k('close_tab')} = close)")
         self.fav.setText(("♥ Unfavorite" if self.main.is_fav(p) else "♡ Favorite") + f" ({k('fav')})")
         for b, text, action in self.keyed:

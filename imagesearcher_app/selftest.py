@@ -872,6 +872,8 @@ def imgtest():
     assert all(not k.isEmpty() for k in keys) and len({k.toString() for k in keys}) == len(keys)
     assert widgets.hotkey({"hotkeys": {"fav": "G"}}, "fav") == "G" and widgets.hotkey({"hotkeys": {}}, "zoom_in") == "+"
 
+    comictest()
+
     # favourites search
     tags = ["blue_eyes", "1girl", "Hatsune_Miku"]
     assert widgets.fav_match(tags, "blue miku") and widgets.fav_match(tags, "") and widgets.fav_match(tags, "1girl -sketch -")
@@ -993,6 +995,47 @@ def favtest():
     sec = NS(ticked=lambda: [down, up], engines=[down, up], complete_down={})
     assert booru_ui.BooruSection.complete(sec, "ab") == [("a", "a")] and calls == ["down", "up"]
     assert booru_ui.BooruSection.complete(sec, "abc") == [("a", "a")] and calls == ["down", "up", "up"], "a down site is skipped"
+
+
+def comictest():
+    """Comics: one query syntax for both sites, Hitomi's image addresses and list intersecting, E-Hentai's page resolving."""
+    from . import comics as C
+    assert C.eh_query("female:big_breasts -male:yaoi series:touhou word") == 'female:"big breasts$" -male:"yaoi$" parody:"touhou$" word'
+    C._gg.update(t=time.time() + 1e6, cases={0x2ba}, default=0, val=1, b="1794")
+    h = "c" * 61 + "ba2"
+    assert C.hi_urls(h) == (f"https://w2.gold-usergeneratedcontent.net/1794/{0x2ba}/{h}.webp",
+                            f"https://btn.gold-usergeneratedcontent.net/webpbigtn/2/ba/{h}.webp")
+    assert core.referer(C.hi_urls(h)[0]) == "https://hitomi.la/"
+    lists = {"tag/female:big breasts-english": [5, 4, 3, 2], "tag/glasses-english": [4, 2, 9], "tag/male:yaoi-english": [2]}
+    asked, orig = [], (C.nozomi, C.hi_gallery)
+    C.nozomi = lambda path, start=None, count=None: asked.append(path) or lists.get(path, [])
+    C.hi_gallery = lambda gid: {"id": str(gid)}
+    try:
+        got = C.HitomiSource("female:big_breasts glasses -male:yaoi language:english").fetch(1)
+    finally:
+        C.nozomi, C.hi_gallery = orig
+    assert [p["id"] for p in got] == ["4"], got
+    assert set(asked) == set(lists), asked
+
+    pages = {"https://e-hentai.org/g/7/ab/?p=0": "".join(f'<a href="https://e-hentai.org/s/k{i}/7-{i}">' for i in range(1, 21)),
+             "https://e-hentai.org/g/7/ab/?p=1": '<a href="https://e-hentai.org/s/k21/7-21">',
+             "https://e-hentai.org/s/k21/7-21": '<img id="img" src="https://h.example/a.webp?x=1&amp;y=2">',
+             "https://e-hentai.org/s/k2/7-2": '<img id="img" src="https://h.example/509.gif">'}
+    orig = C.http
+    C.http = lambda url, **kw: pages[url].encode()
+    try:
+        assert C.eh_resolve("https://e-hentai.org/g/7/ab/?page=21") == "https://h.example/a.webp?x=1&y=2"
+        try:
+            C.eh_resolve("https://e-hentai.org/g/7/ab/?page=2")
+            raise AssertionError("509 = limit")
+        except RuntimeError as e:
+            assert "limit" in str(e)
+    finally:
+        C.http = orig
+    post = C.eh_post({"gid": 7, "token": "ab", "filecount": "2", "title": "T &amp; U", "thumb": "https://ehgt.org/t.webp",
+                      "category": "Manga", "tags": ["artist:x", "parody:y", "female:z"]})
+    assert post["title"] == "T & U" and post["cats"]["artist"] == ["artist:x"] and post["cats"]["copyright"] == ["parody:y"]
+    assert core.dest("/d", post, 1, "q").name == "eh_7_p1.webp" and C.EH_PAGE.match(post["files"][1])
 
 
 def updatetest():

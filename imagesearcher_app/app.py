@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from . import core, imageboard, look, pawchive, pixiv, widgets, x
 from .booru_ui import BooruSection
+from .comics_ui import ComicsSection
 from .keys import KeysDialog, missing
 from .core import (
     HISTORY_DIR, HOTKEYS, NAMES, allowed, clear_cache, download_post, fetch_all, interleave, load_conf, log, move_favorite, run,
@@ -292,9 +293,11 @@ class Main(QMainWindow):
         self.boorus, self.pixiv = BooruSection(self), PixivSection(self)
         self.paw = PawSection(self)
         self.reader = ReaderSection(self)
+        self.comics = ComicsSection(self)
         self.x = XSection(self) if self.conf["x"]["enabled"] else None
         self.ib = IBSection(self) if self.conf["ib"]["enabled"] else None
-        secs = [(self.boorus, "Boorus", "boorus"), (self.pixiv, "Pixiv", "pixiv"), (self.paw, "Pawchive", "paw"), (self.reader, "Reader", "reader")] \
+        secs = [(self.boorus, "Boorus", "boorus"), (self.pixiv, "Pixiv", "pixiv"), (self.paw, "Pawchive", "paw"), (self.comics, "Comics", "comics"),
+                (self.reader, "Reader", "reader")] \
             + ([(self.x, "X", "x")] if self.x else []) + ([(self.ib, "Imageboard", "ib")] if self.ib else [])
         for i, (sec, name, action) in enumerate(secs):
             b = QPushButton(f"{name}", checkable=True, toolTip=widgets.key_text(self.conf, action), minimumWidth=110)
@@ -321,7 +324,7 @@ class Main(QMainWindow):
         self.statusBar().addPermanentWidget(self.cancel_btn)
         self.last_status = ""
         self.statusBar().messageChanged.connect(self.log_status)  # everything shown down there is in the log too
-        self.show_section({"pixiv": self.pixiv, "x": self.x, "ib": self.ib, "paw": self.paw, "rd": self.reader}.get(self.conf["section"]) or self.boorus)
+        self.show_section({"pixiv": self.pixiv, "x": self.x, "ib": self.ib, "paw": self.paw, "rd": self.reader, "comics": self.comics}.get(self.conf["section"]) or self.boorus)
 
     def show_section(self, sec):
         if widgets.BACKGROUND:  # a middle-click: the tab opens where it belongs, you stay where you are
@@ -330,7 +333,7 @@ class Main(QMainWindow):
             log.info("section -> %s", self.switch.button(self.stack.indexOf(sec)).text())
         self.stack.setCurrentWidget(sec)
         self.switch.button(self.stack.indexOf(sec)).setChecked(True)
-        self.conf["section"] = {id(self.pixiv): "pixiv", id(self.x): "x", id(self.ib): "ib", id(self.paw): "paw", id(self.reader): "rd"}.get(id(sec), "boorus")
+        self.conf["section"] = {id(self.pixiv): "pixiv", id(self.x): "x", id(self.ib): "ib", id(self.paw): "paw", id(self.reader): "rd", id(self.comics): "comics"}.get(id(sec), "boorus")
 
     def read(self, tag):
         """📖 Read in Reader, from any section's tags."""
@@ -354,7 +357,7 @@ class Main(QMainWindow):
 
     def owner(self, p):
         """The section a post belongs to (a booru feed can hold Pixiv posts): its site favourites, its favourites tab."""
-        return {"pixiv": self.pixiv, "x": self.x, "ib": self.ib, "paw": self.paw}.get(p["site"]) or self.boorus
+        return {"pixiv": self.pixiv, "x": self.x, "ib": self.ib, "paw": self.paw, "eh": self.comics, "hitomi": self.comics}.get(p["site"]) or self.boorus
 
     def is_fav(self, p):
         return any(same(f, p) for f in self.conf["favorites"])
@@ -368,7 +371,7 @@ class Main(QMainWindow):
             favs.insert(0, p)
             log.info("favorite %s #%s", p["site"], p["id"])
         save_conf(self.conf)
-        sec = {"pixiv": self.pixiv, "x": self.x, "ib": self.ib, "paw": self.paw}.get(p["site"], self.boorus)
+        sec = {"pixiv": self.pixiv, "x": self.x, "ib": self.ib, "paw": self.paw, "eh": self.comics, "hitomi": self.comics}.get(p["site"], self.boorus)
         if sec:  # open image tabs keep their own post
             sec.refresh_favs()
         for g in self.findChildren(widgets.Grid):  # ♥ on every grid showing it

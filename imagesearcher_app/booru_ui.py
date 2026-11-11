@@ -31,7 +31,7 @@ class BooruSection(Section):
         self.tags_tab = self.add_fixed(TagsTab(self), "Tags", grid=False)
         self.new = NewFeed(self)
         self.add_fixed(self.new, "New")
-        self.favs = Favorites(self, lambda p: p["site"] not in ("pixiv", "x", "ib", "paw"))
+        self.favs = Favorites(self, lambda p: p["site"] not in ("pixiv", "x", "ib", "paw", "eh", "hitomi"))
         self.add_fixed(self.favs, "Favorites")
         self.refresh_favs()
 

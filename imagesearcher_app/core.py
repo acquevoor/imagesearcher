@@ -24,7 +24,8 @@ PIXIV_REFERER = "https://app-api.pixiv.net/"
 def referer(url):
     """The Referer an image host wants, or "". Without it Gelbooru's image hosts redirect to hotlink.php, then a web page."""
     host = urllib.parse.urlsplit(url).hostname or ""
-    return PIXIV_REFERER if host.endswith("pximg.net") else "https://gelbooru.com/" if host.endswith(".gelbooru.com") else ""
+    return (PIXIV_REFERER if host.endswith("pximg.net") else "https://gelbooru.com/" if host.endswith(".gelbooru.com")
+            else "https://hitomi.la/" if host.endswith("gold-usergeneratedcontent.net") else "")
 
 CAT_COLOR = {"artist": "#e0474c", "copyright": "#b05ce6", "character": "#2fb344", "species": "#ed7d31",
              "general": "#3b8eea", "meta": "#e8a33d"}
@@ -73,6 +74,8 @@ DEFAULTS = {
     "paw": {"host": "pawchive.pw", "node": 2, "session": "", "bulk": {}},
     "paw_saved": [],
     "rd_saved": [],
+    "comics": {"sources": ["eh", "hitomi"]},
+    "comics_saved": [],
     "site_favs": [],  # "site:id" of posts you added to the site's own favourites from here (booru APIs don't say)
     "hotkeys": {},  # action -> key, only the ones changed in Settings → Hotkeys… (HOTKEYS has the defaults)
 }
@@ -87,6 +90,7 @@ HOTKEYS = {  # action -> (what it does, default key)
     "next_tab": ("Image tabs: next", "Ctrl+Tab"), "prev_tab": ("Image tabs: previous", "Ctrl+Shift+Tab"),
     "boorus": ("Show Boorus", "Ctrl+1"), "pixiv": ("Show Pixiv", "Ctrl+2"), "x": ("Show X", "Ctrl+3"),
     "ib": ("Show Imageboard", "Ctrl+4"), "paw": ("Show Pawchive", "Ctrl+5"), "reader": ("Show Reader", "Ctrl+6"),
+    "comics": ("Show Comics", "Ctrl+7"),
 }
 CONF_LOCK = threading.RLock()  # workers add to pixiv_map / refresh the Pixiv token while the UI saves
 
@@ -196,9 +200,13 @@ def net_level(url):
 HOST_HEADERS = {}
 
 
+RESOLVERS = []  # (compiled regex, fn(url) -> real URL): page addresses that stand for an image (an E-Hentai page)
+
+
 def open_url(url, data=None, headers=None, timeout=30, method=None):
     """Every request goes through here and is logged: method, URL (secrets masked), status and time.
     Bodies of POSTs are never logged (they carry tokens)."""
+    url = next((fn(url) for rx, fn in RESOLVERS if rx.match(url)), url)
     host = urllib.parse.urlsplit(url).hostname or ""
     h = {"User-Agent": UA, **HOST_HEADERS.get(host, {}), **(headers or {})}
     if referer(url):
@@ -254,8 +262,8 @@ def qs(**params):
 
 
 # ---------- posts ----------
-LABELS = {"pixiv": "PX", "x": "X", "ib": "4ch", "paw": "PW"}  # site id -> short tile label, filled from the booru registry
-NAMES = {"pixiv": "Pixiv", "x": "X", "ib": "Imageboard", "paw": "Pawchive"}
+LABELS = {"pixiv": "PX", "x": "X", "ib": "4ch", "paw": "PW", "eh": "EH", "hitomi": "HI"}  # site id -> short tile label, filled from the booru registry
+NAMES = {"pixiv": "Pixiv", "x": "X", "ib": "Imageboard", "paw": "Pawchive", "eh": "E-Hentai", "hitomi": "Hitomi"}
 
 
 def make_post(site, pid, thumb, files, samples, tags, rating, page, w=0, h=0, **extra):
@@ -334,7 +342,7 @@ def dest(root, post, i, query):
     folder = re.sub(r"[^\w\-+.() ]", "_", query).strip()[:100] or "_all"
     name = Path(urllib.parse.urlparse(post["files"][i]).path)
     page = f"_p{i}" if len(post["files"]) > 1 else ""
-    return Path(root) / post["site"] / folder / f"{post['site']}_{post['id']}{page}{name.suffix}"
+    return Path(root) / post["site"] / folder / f"{post['site']}_{post['id']}{page}{name.suffix or post.get('ext', '')}"
 
 
 CACHE_MARK = ".imagesearcher-cache"  # only a cache/ holding this file is ever deleted

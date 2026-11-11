@@ -11,6 +11,7 @@ Browser and downloader in two sections:
   | e621 | e621, e926 |
   | Philomena | derpibooru, furbooru |
 
+- **Comics**: E-Hentai and Hitomi galleries, searched together.
 - **Pixiv**: Pixiv's own search filters, rankings, trending tags, recommended, the works of artists you follow, your bookmarks, and artist / series pages, with bookmark and follow buttons that act on your account.
 
 PySide6 + Python stdlib.
@@ -162,6 +163,15 @@ Pawchive (pawchive.st, now **pawchive.pw**) is a Kemono-style archive of creator
 **Importer** opens the site's own importer page in your browser; the app never touches your Patreon or Fanbox keys.
 
 **Thumbnails need WebP support.** Pawchive's thumbnails are WebP files. The Nix package and the Windows PySide6 install include it. If thumbnails show blank, the log will say that WebP support is missing.
+
+## Comics
+**E-Hentai** and **Hitomi**, side by side (tick either or both on the bar). NSFW. No accounts needed, nothing is logged in.
+
+- **Latest**, **Popular** (E-Hentai's popular page, Hitomi's popular this week) and **Favorites** (your ♥), plus a tab per search or tag.
+- **One search syntax for both sites**: words and `namespace:tag` terms, `_` for spaces, `-term` excludes. For example `female:big_breasts artist:shindol language:english -male:yaoi`. Namespaces: female, male, mixed, other, artist, group, parody / series, character, language, type. On Hitomi a plain word is looked up as a tag, not as title text.
+- **A gallery is one tile**; open it and turn pages with PgUp/PgDn, or ▤ strip view to read it scrolling (zoom out, click / drag pages to copy them). Tags open a search, and the gallery's artist and series get quick-search buttons.
+- **E-Hentai** pages are the site's normal-size images (about 1280 px wide), fetched only when you open them. E-Hentai limits how many images one address can view; past it, pages fail with "image limit reached" until it resets. ExHentai and site favourites need an account and aren't supported.
+- Downloads go to `<download dir>/eh/` or `hitomi/`, one file per page.
 
 ## Imageboard (opt-in)
 Browse 4chan's **/trash/**, **/d/** and **/h/**, live and through the archives. Switch it on in ⚙, then restart. These boards are NSFW.
