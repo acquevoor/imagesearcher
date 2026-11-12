@@ -1104,7 +1104,7 @@ def updatetest():
             return buf.getvalue()
         sha1, sha2, sha3, code = "a" * 40, "b" * 40, "c" * 40, str(Path(tmp, "code"))
         served = {}
-        launcher.fetch = lambda url, accept="", timeout=30: served["sha"].encode() if "api.github" in url else served["zip"]
+        launcher.fetch = lambda url, accept="", timeout=30: f"003f{served['sha']} refs/heads/master\n".encode() if "info/refs" in url else served["zip"]
         served.update(sha=sha1, zip=fake_zip(**{"r/imagesearcher_app/app.py": "main = 1", "r/evil.py": "x", "r/imagesearcher_app/sub/x.py": "x"}))
         launcher.update(str(plain), code)
         assert launcher.current(code) == str(Path(code, sha1)) and sorted(os.listdir(Path(code, sha1, "imagesearcher_app"))) == ["app.py"]
