@@ -1000,22 +1000,36 @@ def favtest():
 def comictest():
     """Comics: one query syntax for both sites, Hitomi's image addresses and list intersecting, E-Hentai's page resolving."""
     from . import comics as C
-    assert C.eh_query("female:big_breasts -male:yaoi series:touhou word") == 'female:"big breasts$" -male:"yaoi$" parody:"touhou$" word'
+    assert C.eh_query("female:big_breasts -male:yaoi series:touhou word tag:full_color -other:ai_generated") == \
+        ('female:"big breasts$" -male:"yaoi$" parody:"touhou$" word "full color$" -"ai generated$"', 0)
+    assert C.eh_query("type:manga type:artistcg -type:western")[1] == (1023 & ~(4 | 8)) | 512
+    assert C.canon("parody:touhou") == "series:touhou" and C.canon("other:full color") == "tag:full color" and C.canon("x") == "tag:x"
+    orig = C.http
+    C.http = lambda url, **kw: json.dumps({"tags": {"1": {"ns": "female", "tn": "big breasts"}, "2": {"ns": "parody", "tn": "touhou"},
+                                                    "3": {"ns": "temp", "tn": "oppai", "mns": "female", "mtn": "big breasts"}}}).encode()
+    try:
+        assert C.complete("big") == [("female:big_breasts", "female:big breasts"), ("series:touhou", "series:touhou")]
+    finally:
+        C.http = orig
     C._gg.update(t=time.time() + 1e6, cases={0x2ba}, default=0, val=1, b="1794")
     h = "c" * 61 + "ba2"
     assert C.hi_urls(h) == (f"https://w2.gold-usergeneratedcontent.net/1794/{0x2ba}/{h}.webp",
                             f"https://btn.gold-usergeneratedcontent.net/webpbigtn/2/ba/{h}.webp")
     assert core.referer(C.hi_urls(h)[0]) == "https://hitomi.la/"
-    lists = {"tag/female:big breasts-english": [5, 4, 3, 2], "tag/glasses-english": [4, 2, 9], "tag/male:yaoi-english": [2]}
+    lists = {"tag/female:big breasts-english": [5, 4, 3, 2], "tag/glasses-english": [4, 2, 9], "index-all": list(range(100, 0, -1))}
+    tags = {2: ["male:yaoi"], **{i: ["tag:ai generated"] for i in range(30, 101)}}  # 100..30 all AI: the first 3 pages are empty
     asked, orig = [], (C.nozomi, C.hi_gallery)
-    C.nozomi = lambda path, start=None, count=None: asked.append(path) or lists.get(path, [])
-    C.hi_gallery = lambda gid: {"id": str(gid)}
+    C.nozomi = lambda path, start=None, count=None: asked.append(path) or lists.get(path, [])[start or 0:(start or 0) + (count or 10 ** 9)]
+    C.hi_gallery = lambda gid: {"id": str(gid), "tags": tags.get(gid, [])}
     try:
         got = C.HitomiSource("female:big_breasts glasses -male:yaoi language:english").fetch(1)
+        assert set(asked) == {"tag/female:big breasts-english", "tag/glasses-english"}, "a -term downloads no list"
+        latest = C.sources({"comics": {"sources": ["hitomi"], "no_ai": True}})[0]
+        first = latest.fetch(1)
     finally:
         C.nozomi, C.hi_gallery = orig
     assert [p["id"] for p in got] == ["4"], got
-    assert set(asked) == set(lists), asked
+    assert [p["id"] for p in first] == ["29", "28", "27", "26"], "AI-only pages are read past, not the end"
 
     pages = {"https://e-hentai.org/g/7/ab/?p=0": "".join(f'<a href="https://e-hentai.org/s/k{i}/7-{i}">' for i in range(1, 21)),
              "https://e-hentai.org/g/7/ab/?p=1": '<a href="https://e-hentai.org/s/k21/7-21">',
@@ -1033,9 +1047,22 @@ def comictest():
     finally:
         C.http = orig
     post = C.eh_post({"gid": 7, "token": "ab", "filecount": "2", "title": "T &amp; U", "thumb": "https://ehgt.org/t.webp",
-                      "category": "Manga", "tags": ["artist:x", "parody:y", "female:z"]})
-    assert post["title"] == "T & U" and post["cats"]["artist"] == ["artist:x"] and post["cats"]["copyright"] == ["parody:y"]
+                      "category": "Artist CG", "tags": ["artist:x", "parody:y", "female:z", "other:ai generated"]})
+    assert post["title"] == "T & U" and post["cats"]["artist"] == ["artist:x"] and post["cats"]["copyright"] == ["series:y"]
+    assert "type:artistcg" in post["tags"] and not C.wanted(post, [("tag", "ai generated")]) and not C.wanted(post, [("", "z")])
     assert core.dest("/d", post, 1, "q").name == "eh_7_p1.webp" and C.EH_PAGE.match(post["files"][1])
+    with tempfile.TemporaryDirectory() as tmp:  # a gallery download: its own folder, pages numbered, already-read pages copied
+        cache = core.local(tmp, post, 0, "cache")
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(b"\xff\xd8jpeg")
+        orig = C.open_url
+        C.open_url = lambda url, **kw: io.BytesIO(b"\x89PNG")
+        try:
+            conf = {"comics": {"dir": ""}}
+            assert C.save(conf, {**post, "title": "a/b: c?"}, tmp) == (2, 0) and C.save(conf, {**post, "title": "a/b: c?"}, tmp) == (0, 2)
+        finally:
+            C.open_url = orig
+        assert sorted(f.name for f in Path(tmp, "comics", "a_b_ c_ [EH 7]").iterdir()) == ["001.jpg", "002.png"]
 
 
 def updatetest():

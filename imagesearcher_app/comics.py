@@ -2,17 +2,23 @@
 one galleries/<id>.js per gallery). One gallery = one tile; its pages are the tile's pages.
 
 Queries are one syntax for both: words and namespace:tag terms, _ for spaces, -term excludes
-("female:big_breasts artist:shindol -male:yaoi language:english")."""
+("female:big_breasts artist:shindol -male:yaoi language:english").
+
+Tags use the same names on both sites (Hitomi's): E-Hentai's parody: is series:, its other: / mixed: / temp: are
+tag:, and its category is type: (doujinshi, manga, artistcg, gamecg, imageset…), so a tag from one site
+searches both."""
 import html
 import json
 import re
+import shutil
 import struct
 import threading
 import time
 import urllib.parse
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
-from .core import RESOLVERS, Source, http, log, make_post
+from .core import LABELS, RESOLVERS, Source, cached, http, log, make_post, open_url
 
 EH = "https://e-hentai.org"
 EH_API = "https://api.e-hentai.org/api.php"
@@ -22,6 +28,10 @@ HI = "https://ltn.gold-usergeneratedcontent.net"
 HI_DOMAIN = "gold-usergeneratedcontent.net"
 PER_PAGE = 25  # Hitomi galleries per feed page
 CATS = {"artist": "artist", "group": "artist", "parody": "copyright", "series": "copyright", "character": "character"}
+NS = {"parody": "series", "other": "tag", "mixed": "tag", "temp": "tag", "reclass": "tag"}  # E-Hentai's namespaces -> the shared ones
+EH_CATS = {"misc": 1, "doujinshi": 2, "manga": 4, "artistcg": 8, "gamecg": 16, "imageset": 32, "cosplay": 64, "asianporn": 128,
+           "non-h": 256, "western": 512}  # type: -> E-Hentai's category bits
+AI = "tag:ai_generated"  # the AI filter's -term (Hitomi hardly tags it, so there it only drops what is tagged)
 
 
 def terms(q):
@@ -31,8 +41,21 @@ def terms(q):
         neg = t.startswith("-") and len(t) > 1
         t = t[1:] if neg else t
         ns, _, val = t.rpartition(":")
-        out.append((neg, ns.lower(), val.replace("_", " ").lower()))
+        out.append((neg, NS.get(ns.lower(), ns.lower()), val.replace("_", " ").lower()))
     return out
+
+
+def canon(tag):
+    """A site's tag -> the shared name ('parody:x' -> 'series:x', 'other:x' / 'x' -> 'tag:x')."""
+    ns, _, val = tag.rpartition(":")
+    return f"{NS.get(ns, ns) or 'tag'}:{val}"
+
+
+def wanted(p, neg):
+    """False if the post has a -term's tag (a plain -word matches that tag in any namespace)."""
+    tags = set(p["tags"])
+    vals = {t.split(":", 1)[-1] for t in tags}
+    return not any(f"{ns}:{val}" in tags if ns else val in vals for ns, val in neg)
 
 
 def cats_of(tags):
@@ -50,12 +73,24 @@ def comic(site, gid, title, thumb, files, tags, page, **extra):
 # ---------- E-Hentai ----------
 
 def eh_query(q):
-    """Our syntax -> E-Hentai's: namespaced terms become exact tags (female:"big breasts$")."""
-    out = []
+    """Our syntax -> E-Hentai's (search, category bits to hide): namespaced terms become exact tags
+    (female:"big breasts$", tag:x -> "x$" in any namespace), type: becomes the category filter."""
+    out, want, hide = [], 0, 0
     for neg, ns, val in terms(q):
-        ns = {"series": "parody", "tag": ""}.get(ns, ns)
-        out.append(("-" if neg else "") + (f'{ns}:"{val}$"' if ns else (f'"{val}"' if " " in val else val)))
-    return " ".join(out)
+        if ns == "type" and (bit := EH_CATS.get(val.replace(" ", ""))):
+            hide, want = (hide | bit, want) if neg else (hide, want | bit)
+            continue
+        ns = {"series": "parody"}.get(ns, ns)
+        out.append(("-" if neg else "") + (f'"{val}$"' if ns == "tag" else f'{ns}:"{val}$"' if ns else (f'"{val}"' if " " in val else val)))
+    return " ".join(out), (1023 & ~want if want else 0) | hide
+
+
+def complete(word):
+    """E-Hentai's tag suggestions (they cover Hitomi's tags too), in the shared names; an alias suggests its main tag."""
+    body = json.dumps({"method": "tagsuggest", "text": word.replace("_", " ")}).encode()
+    tags = json.loads(http(EH_API, data=body, headers={"Content-Type": "application/json"}, timeout=4)).get("tags") or {}
+    out = dict.fromkeys(canon(f"{t.get('mns', t['ns'])}:{t.get('mtn', t['tn'])}") for t in tags.values())
+    return [(t.replace(" ", "_"), t) for t in out]
 
 
 def eh_gdata(ids):
@@ -71,7 +106,7 @@ def eh_post(m):
     gid, token, n = m["gid"], m["token"], int(m["filecount"])
     title = html.unescape(m["title"])
     files = [f"{EH}/g/{gid}/{token}/?page={i}" for i in range(1, n + 1)]
-    tags = [t if ":" in t else f"tag:{t}" for t in m.get("tags", [])]
+    tags = [canon(t) for t in m.get("tags", [])] + [f"type:{m['category'].lower().replace(' ', '')}"]
     return comic("eh", gid, title, m["thumb"], files, tags, f"{EH}/g/{gid}/{token}/", rating="q" if m["category"] == "Non-H" else "e",
                  category=m["category"], uploaded=int(m.get("posted") or 0), score=float(m.get("rating") or 0), user_name=m.get("uploader", ""))
 
@@ -82,18 +117,20 @@ class EHSource(Source):
 
     def __init__(self, q="", path="/"):
         self.q, self.path, self.next = q, path, None
+        self.neg = [(ns, val) for neg, ns, val in terms(q) if neg]  # also checked here: /popular takes no search
 
     def fetch(self, page):
         if page > 1 and not self.next:
             return []
-        params = {"f_search": eh_query(self.q)} if self.q else {}
+        search, cats = eh_query(self.q) if self.path == "/" else ("", 0)
+        params = {k: v for k, v in (("f_search", search), ("f_cats", cats)) if v}
         if page > 1:
             params["next"] = self.next
         text = http(f"{EH}{self.path}?{urllib.parse.urlencode(params)}" if params else EH + self.path, headers=EH_COOKIE).decode(errors="replace")
         ids = list(dict.fromkeys(re.findall(r"https://e-hentai\.org/g/(\d+)/(\w+)/", text)))
         nxt = re.search(r'id="unext" href="[^"]*next=(\d+)', text)
         self.next = nxt and self.path == "/" and nxt[1]
-        posts = [eh_post(m) for m in eh_gdata(ids)] if ids else []
+        posts = [p for m in (eh_gdata(ids) if ids else []) if wanted(p := eh_post(m), self.neg)]
         log.info("e-hentai %s'%s' page %d: %d galleries", self.path.strip("/") + " " if self.path != "/" else "", self.q, page, len(posts))
         return posts
 
@@ -180,37 +217,41 @@ def nozomi(path, start=None, count=None):
 
 
 class HitomiSource(Source):
-    """Newest, popular or a tag search. One positive term pages through its list in place; more terms or
-    any -term read the whole lists once and intersect them."""
+    """Newest, popular or a tag search. One tag pages through its list in place; more tags read their whole
+    lists once and intersect them. -terms are checked on the galleries themselves (no list to download)."""
     label = "HI"
 
     def __init__(self, q="", popular=""):
-        self.ids, self.lang, self.lists = None, "all", []
+        self.lang, self.ids, self.at, self.neg, pos = "all", None, 0, [], []
         for neg, ns, val in terms(q):
             if ns == "language" and not neg:
                 self.lang = val
-                continue
-            area = {"female": "tag", "male": "tag", "": "tag", "tag": "tag", "parody": "series"}.get(ns, ns)
-            tag = f"{ns}:{val}" if ns in ("female", "male") else val
-            self.lists.append((neg, f"{area}/{tag}"))
-        self.base = f"popular/{popular}" if popular else "index"
+            elif neg:
+                self.neg.append((ns, val))
+            else:
+                area = {"female": "tag", "male": "tag", "": "tag"}.get(ns, ns)
+                pos.append(f"{area}/{f'{ns}:{val}' if ns in ('female', 'male') else val}")
+        self.lists = pos or [f"popular/{popular}" if popular else "index"]
 
     def fetch(self, page):
-        pos = [p for neg, p in self.lists if not neg]
-        if len(self.lists) <= 1 and not any(neg for neg, _ in self.lists):
-            ids = nozomi(f"{pos[0]}-{self.lang}" if pos else f"{self.base}-{self.lang}", (page - 1) * PER_PAGE, PER_PAGE)
-        else:
-            if self.ids is None:
-                lists = {p: nozomi(f"{p}-{self.lang}") for _, p in self.lists}
-                keep = lists[pos[0]] if pos else nozomi(f"index-{self.lang}")
-                ok = set.intersection(*(set(lists[p]) for p in pos)) if pos else set(keep)
-                ok -= {i for neg, p in self.lists if neg for i in lists[p]}
-                self.ids = [i for i in keep if i in ok]
-            ids = self.ids[(page - 1) * PER_PAGE:page * PER_PAGE]
-        with ThreadPoolExecutor(8) as ex:
-            posts = list(ex.map(lambda i: _try(hi_gallery, i), ids))
-        posts = [p for p in posts if p]
-        log.info("hitomi %s page %d: %d galleries", " ".join(p for _, p in self.lists) or self.base, page, len(posts))
+        if page == 1:
+            self.at = 0
+        posts = []
+        for _ in range(4):  # ponytail: a page the -terms empty reads up to 3 more, then the list counts as done
+            if len(self.lists) == 1:
+                ids = nozomi(f"{self.lists[0]}-{self.lang}", self.at, PER_PAGE)
+            else:
+                if self.ids is None:
+                    first, *rest = (nozomi(f"{p}-{self.lang}") for p in self.lists)
+                    ok = set.intersection(*map(set, rest))
+                    self.ids = [i for i in first if i in ok]
+                ids = self.ids[self.at:self.at + PER_PAGE]
+            self.at += PER_PAGE
+            with ThreadPoolExecutor(8) as ex:
+                posts += [p for p in ex.map(lambda i: _try(hi_gallery, i), ids) if p and wanted(p, self.neg)]
+            if posts or len(ids) < PER_PAGE:
+                break
+        log.info("hitomi %s page %d: %d galleries", " ".join(self.lists), page, len(posts))
         return posts
 
 
@@ -223,9 +264,36 @@ def _try(fn, *a):
 
 
 def sources(conf, q="", popular=False):
-    on = conf["comics"]["sources"]
-    return ([EHSource(q, "/popular" if popular else "/")] if "eh" in on and not (popular and q) else []) + \
-           ([HitomiSource(q, "week" if popular else "")] if "hitomi" in on else [])
+    on, ai = conf["comics"]["sources"], f" -{AI}" * conf["comics"]["no_ai"]
+    return ([EHSource(q + ai, "/popular" if popular else "/")] if "eh" in on and not (popular and q) else []) + \
+           ([HitomiSource(q + ai, "week" if popular else "")] if "hitomi" in on else [])
+
+
+SNIFF = {b"\xff\xd8": ".jpg", b"\x89P": ".png", b"GI": ".gif"}
+
+
+def save(conf, p, root, cancel=None):
+    """A whole gallery into its own folder: <comics dir>/<title> [EH 123]/001.jpg… -> (new, skipped)."""
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", p.get("title") or "").strip(" .")[:150]
+    folder = Path(conf["comics"]["dir"] or Path(root) / "comics") / f"{name} [{LABELS[p['site']]} {p['id']}]".strip()
+    folder.mkdir(parents=True, exist_ok=True)
+    new = skip = 0
+    for i, url in enumerate(p["files"]):
+        if cancel and cancel.is_set():
+            break
+        if any(folder.glob(f"{i + 1:03}.*")):
+            skip += 1
+            continue
+        tmp = folder / f"{i + 1:03}.part"
+        if c := cached(root, p, i):  # already read: copy instead of downloading again
+            shutil.copyfile(c, tmp)
+        else:
+            with open_url(url, timeout=120) as r, open(tmp, "wb") as f:
+                shutil.copyfileobj(r, f)
+        with open(tmp, "rb") as f:
+            tmp.replace(tmp.with_suffix(SNIFF.get(f.read(2), ".webp")))
+        new += 1
+    return new, skip
 
 
 RESOLVERS.append((EH_PAGE, eh_resolve))

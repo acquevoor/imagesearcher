@@ -74,7 +74,7 @@ DEFAULTS = {
     "paw": {"host": "pawchive.pw", "node": 2, "session": "", "bulk": {}},
     "paw_saved": [],
     "rd_saved": [],
-    "comics": {"sources": ["eh", "hitomi"]},
+    "comics": {"sources": ["eh", "hitomi"], "no_ai": True, "dir": ""},
     "comics_saved": [],
     "site_favs": [],  # "site:id" of posts you added to the site's own favourites from here (booru APIs don't say)
     "hotkeys": {},  # action -> key, only the ones changed in Settings → Hotkeys… (HOTKEYS has the defaults)

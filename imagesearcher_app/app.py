@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QKeySequenceEdit, QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from . import core, imageboard, look, pawchive, pixiv, widgets, x
+from . import comics, core, imageboard, look, pawchive, pixiv, widgets, x
 from .booru_ui import BooruSection
 from .comics_ui import ComicsSection
 from .keys import KeysDialog, missing
@@ -78,6 +78,12 @@ class Settings(QDialog):
         row.addWidget(self.dir)
         row.addWidget(browse)
         form.addRow("Download dir", row)
+        self.cdir = QLineEdit(c["comics"]["dir"], placeholderText="empty = <download dir>/comics")
+        browse = QPushButton("…", clicked=lambda: self.cdir.setText(QFileDialog.getExistingDirectory(self, "Comics dir", self.cdir.text()) or self.cdir.text()))
+        row = QHBoxLayout()
+        row.addWidget(self.cdir)
+        row.addWidget(browse)
+        form.addRow("Comics dir (a folder a gallery)", row)
         self.limit = QSpinBox(minimum=10, maximum=100, value=c["limit"])
         form.addRow("Booru posts per page", self.limit)
         form.addRow("Keyboard", QPushButton("⌨ Hotkeys…", clicked=lambda: Hotkeys(main).exec()))
@@ -223,6 +229,7 @@ class Settings(QDialog):
             pixiv.logout()
         conf["blacklist"] = sorted(set(self.bl.toPlainText().lower().split()))
         conf["download_dir"], conf["limit"] = self.dir.text().strip(), self.limit.value()
+        conf["comics"]["dir"] = self.cdir.text().strip()
         if getattr(self, "x_ua", ""):
             conf["x"]["ua"] = self.x_ua
         conf["x"].update(enabled=self.x_on.isChecked(), auth_token=self.x_token.text().strip(), ct0=self.x_ct0.text().strip(),
@@ -388,6 +395,8 @@ class Main(QMainWindow):
     def save_post(self, p, root, label, cancel=None):
         if p["site"] == "ib":  # original filenames, imageboard/<board>/<label>/
             return imageboard.save(self.conf, p, root, label, cancel)
+        if p["site"] in ("eh", "hitomi"):  # one folder a gallery, <comics dir>/<title> [EH 123]/001.jpg
+            return comics.save(self.conf, p, root, cancel)
         if p["site"] == "paw":  # original filenames, pawchive/<creator> (<service>)/<post> - <title>/
             return pawchive.save(self.conf, p, root, cancel)
         if p.get("ugoira"):

@@ -168,10 +168,12 @@ Pawchive (pawchive.st, now **pawchive.pw**) is a Kemono-style archive of creator
 **E-Hentai** and **Hitomi**, side by side (tick either or both on the bar). NSFW. No accounts needed, nothing is logged in.
 
 - **Latest**, **Popular** (E-Hentai's popular page, Hitomi's popular this week) and **Favorites** (your ♥), plus a tab per search or tag.
-- **One search syntax for both sites**: words and `namespace:tag` terms, `_` for spaces, `-term` excludes. For example `female:big_breasts artist:shindol language:english -male:yaoi`. Namespaces: female, male, mixed, other, artist, group, parody / series, character, language, type. On Hitomi a plain word is looked up as a tag, not as title text.
+- **One search syntax for both sites**: words and `namespace:tag` terms, `_` for spaces, `-term` excludes. For example `female:big_breasts artist:shindol language:english -male:yaoi`. Namespaces: female, male, tag, artist, group, series, character, language, type (doujinshi, manga, artistcg, gamecg, imageset, …). On Hitomi a plain word is looked up as a tag, not as title text.
+- **Tags are the same on both sites**: E-Hentai's parody: shows as series:, its other: / mixed: as tag:, its category as type:, so any tag you click searches both. Typing a tag autocompletes from E-Hentai's tag list (covers Hitomi's too).
+- **Hide AI** (on by default) leaves out galleries tagged AI generated. Hitomi rarely tags them, so there it only drops the tagged ones. Hitomi's `-terms` are checked on the galleries themselves, so excluding never downloads a whole list.
 - **A gallery is one tile**; open it and turn pages with PgUp/PgDn, or ▤ strip view to read it scrolling (zoom out, click / drag pages to copy them). Tags open a search, and the gallery's artist and series get quick-search buttons.
 - **E-Hentai** pages are the site's normal-size images (about 1280 px wide), fetched only when you open them. E-Hentai limits how many images one address can view; past it, pages fail with "image limit reached" until it resets. ExHentai and site favourites need an account and aren't supported.
-- Downloads go to `<download dir>/eh/` or `hitomi/`, one file per page.
+- **Downloads**: a gallery goes into its own folder, `<comics dir>/<title> [EH 123]/001.jpg…`. Set the comics dir in ⚙ Settings (empty = `<download dir>/comics`).
 
 ## Imageboard (opt-in)
 Browse 4chan's **/trash/**, **/d/** and **/h/**, live and through the archives. Switch it on in ⚙, then restart. These boards are NSFW.

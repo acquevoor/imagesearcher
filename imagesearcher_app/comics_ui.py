@@ -20,19 +20,29 @@ class ComicsSection(Section):
             cb.toggled.connect(self.ticked)
             self.ticks[sid] = cb
             self.bar.addWidget(cb)
-        for w in (QPushButton("Search", clicked=lambda: self.search()), self.saved, self.star):
+        self.no_ai = QCheckBox("Hide AI", checked=self.conf["comics"]["no_ai"], toolTip=f"Leaves out galleries tagged AI generated "
+                               f"(adds -{comics.AI} to every search). Hitomi rarely tags them, so there it only drops the tagged ones")
+        self.no_ai.toggled.connect(self.ticked)
+        for w in (self.no_ai, QPushButton("Search", clicked=lambda: self.search()), self.saved, self.star):
             self.bar.addWidget(w)
         self.latest = LazyFeed(self, "Latest", lambda: comics.sources(self.conf))
         self.add_fixed(self.latest, "Latest")
-        self.add_fixed(LazyFeed(self, "Popular", lambda: comics.sources(self.conf, popular=True)), "Popular")
+        self.popular = LazyFeed(self, "Popular", lambda: comics.sources(self.conf, popular=True))
+        self.add_fixed(self.popular, "Popular")
         self.favs = Favorites(self, lambda p: p["site"] in ("eh", "hitomi"))
         self.add_fixed(self.favs, "Favorites")
         self.refresh_favs()
 
     def ticked(self):
-        self.conf["comics"]["sources"] = [sid for sid, cb in self.ticks.items() if cb.isChecked()]
+        self.conf["comics"].update(sources=[sid for sid, cb in self.ticks.items() if cb.isChecked()], no_ai=self.no_ai.isChecked())
         save_conf(self.conf)
-        log.info("comics: searching %s", ", ".join(self.conf["comics"]["sources"]) or "nothing")
+        log.info("comics: searching %s%s", ", ".join(self.conf["comics"]["sources"]) or "nothing", ", AI hidden" * self.no_ai.isChecked())
+        for f in (self.latest, self.popular):  # already loaded: again with the new choice
+            if f.started:
+                f.start(f.make())
+
+    def complete(self, word):
+        return comics.complete(word)
 
     def search(self, q=None):
         q = (self.q.text() if q is None else q).strip()
@@ -52,5 +62,5 @@ class ComicsSection(Section):
         p = v.p
         if p["site"] not in ("eh", "hitomi"):
             return []
-        keys = [t for t in p["tags"] if t.split(":", 1)[0] in ("artist", "group", "parody", "series")][:4]
+        keys = [t for t in p["tags"] if t.split(":", 1)[0] in ("artist", "group", "series")][:4]
         return [(f"🔎 {t}", lambda t=t: self.open_tag(t)) for t in keys]
